@@ -42,19 +42,37 @@
 let _helixOverlayEnabled = true;
 const _HELIX_N_TURNS = 1;   // one full revolution = bottom to top of cavity
 
-// First entry is the PRIMARY: wall distance per (ring, cell). Plotted
-// at literal world-mm (no normalization) so the trail traces the
-// actual cavity wall as the helicoid intersects it. Boss v10:
-// "no visible 3d vug, the only indication of the vugg shape is the
-// reading at the wall of the vugg where it intersects with the
-// helicoid." Cavity mesh + crystal meshes are hidden in
-// _topoHelixOverlayDraw; this trail is what reveals the cavity shape.
+// Pure-JS HSL → hex, no THREE dependency at module-load time. Used
+// to spread the 41 ion trail colours evenly around the hue wheel.
+function _hexFromHSL(h: number, s: number, l: number): number {
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h * 12) % 12;
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+  };
+  const r = Math.round(f(0) * 255);
+  const g = Math.round(f(8) * 255);
+  const b = Math.round(f(4) * 255);
+  return (r << 16) | (g << 8) | b;
+}
+
+// First entry is the PRIMARY: wall distance per (ring, cell), white,
+// plotted at literal world-mm (no normalization). v11: future-fade
+// too — the wall is static during a scenario, so we can predict its
+// position 1/4 turn ahead and render those segments with the same
+// alpha ramp as the past. Boss: "its a known constant, so it makes
+// sense that you could predict where it will be relatively."
 //
-// The other entries are SECONDARIES: per-ring chemistry, normalized
-// into [0, R]. `read(sim, wall, ringIdx, cellIdx)` — primary uses
-// cellIdx for per-cell wall lookup; secondaries ignore it (chemistry
-// is per-ring in this simulator).
-const _HELIX_CHEM_PARAMS: Array<{
+// Then specials: temperature (from ring_temperatures), then pH / Eh
+// / salinity / O2 (from ring_fluids).
+//
+// Then 41 ions covering the full simulator fluid vocabulary
+// (_fluidFieldNames). Each ion's [min, max] range is set from
+// observed typical concentrations grouped into majors (0-500 mg/L),
+// commons (0-200), low (0-50), trace (0-10), ultra-trace (0-5).
+// Colours auto-distributed via HSL hue spread so 41 lines stay
+// distinguishable.
+type ChemParam = {
   id: string,
   label: string,
   min: number,
@@ -62,8 +80,14 @@ const _HELIX_CHEM_PARAMS: Array<{
   color: number,
   primary?: boolean,
   read: (sim: any, wall: any, ringIdx: number, cellIdx: number) => number | null | undefined,
-}> = [
-  { id: 'wall', label: 'wall distance', min: 0, max: 0, color: 0xffffff,
+};
+
+const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
+  const params: ChemParam[] = [];
+
+  // Primary
+  params.push({
+    id: 'wall', label: 'wall distance', min: 0, max: 0, color: 0xffffff,
     primary: true,
     read: (sim, wall, i, c) => {
       if (!wall || !wall.rings) return null;
@@ -72,20 +96,53 @@ const _HELIX_CHEM_PARAMS: Array<{
       const cell = ring[c % ring.length];
       if (!cell) return null;
       return (cell.base_radius_mm || 0) + (cell.wall_depth || 0);
-    } },
-  { id: 'T',   label: 'temperature', min: 50,  max: 250,  color: 0xff5544,
-    read: (s, w, i, c) => (s.ring_temperatures || [])[i] },
-  { id: 'pH',  label: 'pH',          min: 2,   max: 12,   color: 0x9966ee,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).pH },
-  { id: 'sal', label: 'salinity',    min: 0,   max: 30,   color: 0x44ccdd,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).salinity },
-  { id: 'Ca',  label: 'Ca',          min: 0,   max: 1000, color: 0x66cc77,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).Ca },
-  { id: 'Fe',  label: 'Fe',          min: 0,   max: 200,  color: 0xee9944,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).Fe },
-  { id: 'Mn',  label: 'Mn',          min: 0,   max: 100,  color: 0xffdd55,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).Mn },
-];
+    },
+  });
+
+  // Specials
+  params.push({ id: 'T',        label: 'temperature', min: 50,   max: 250,  color: 0xff5544,
+    read: (s, w, i, c) => (s.ring_temperatures || [])[i] });
+  params.push({ id: 'pH',       label: 'pH',          min: 2,    max: 12,   color: 0x9966ee,
+    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).pH });
+  params.push({ id: 'Eh',       label: 'Eh',          min: -400, max: 800,  color: 0xddee44,
+    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).Eh });
+  params.push({ id: 'salinity', label: 'salinity',    min: 0,    max: 30,   color: 0x44ccdd,
+    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).salinity });
+  params.push({ id: 'O2',       label: 'O2',          min: 0,    max: 10,   color: 0xaaccff,
+    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).O2 });
+
+  // Ions — id, min, max. Ranges chosen from observed typical values
+  // in MVT-seed-42 sample fluid (see the helix-record data dump).
+  const ION_DEFS: Array<[string, number, number]> = [
+    // Majors (0-500 mg/L)
+    ['SiO2', 0, 500], ['Ca', 0, 500], ['CO3', 0, 500], ['Cl', 0, 500],
+    ['Na', 0, 200],   ['Mg', 0, 100], ['K', 0, 50],    ['S', 0, 100], ['F', 0, 100],
+    // Common metals (0-200)
+    ['Fe', 0, 200],   ['Mn', 0, 200], ['Zn', 0, 200],  ['Pb', 0, 200], ['Cu', 0, 50],
+    // Common others
+    ['Ba', 0, 50],    ['Sr', 0, 50],  ['Al', 0, 50],   ['P', 0, 50],   ['As', 0, 50],
+    // Trace (0-10)
+    ['Ti', 0, 10],    ['U', 0, 10],   ['Mo', 0, 10],   ['Cr', 0, 10],  ['V', 0, 10],
+    ['W', 0, 10],     ['Ag', 0, 20],  ['Bi', 0, 10],   ['Sb', 0, 10],  ['Ni', 0, 10],
+    ['Co', 0, 10],    ['B', 0, 10],   ['Li', 0, 10],   ['Cd', 0, 10],  ['Y', 0, 10],
+    // Ultra-trace (0-5)
+    ['Be', 0, 5],     ['Te', 0, 5],   ['Se', 0, 5],    ['Ge', 0, 5],   ['Au', 0, 5],
+    ['Hg', 0, 5],     ['Sn', 0, 5],
+  ];
+
+  for (let i = 0; i < ION_DEFS.length; i++) {
+    const [ionId, mn, mx] = ION_DEFS[i];
+    const hue = i / ION_DEFS.length;          // even hue spread
+    const color = _hexFromHSL(hue, 0.7, 0.55);
+    params.push({
+      id: ionId, label: ionId, min: mn, max: mx, color,
+      read: (s: any, w: any, ri: number, c: number) =>
+        ((s.ring_fluids || [])[ri] || {})[ionId],
+    });
+  }
+
+  return params;
+})();
 
 const _HELIX_FADE_ANGLE = Math.PI / 2;   // 1/4 turn — boss spec
 const _HELIX_SAMPLE_STEP = Math.PI / 90;  // sample every 2° of sweep
@@ -289,9 +346,12 @@ let _helixTrails: Array<Array<Array<{ sweep: number, r: number }>>> = [];
 let _helixTrailGroup: any = null;
 const _helixTrailLines: any[] = [];
 
-// 16 rings × ~45 samples × 2 verts per segment = 1440 verts per param.
-// 2048 budget gives ~40% headroom.
-const _TRAIL_MAX_VERTS_PER_PARAM = 2048;
+// 16 rings × ~45 past samples × 2 verts per segment = 1440 verts per
+// secondary param. PRIMARY also renders 45 future segments (wall is
+// static so we can predict): 16 × (45 past + 45 future) × 2 = 2880
+// verts. 4096 budget gives ~40% headroom for primary, plenty for
+// secondaries.
+const _TRAIL_MAX_VERTS_PER_PARAM = 4096;
 
 function _helixClearTrails() {
   for (let p = 0; p < _helixTrails.length; p++) {
@@ -401,9 +461,9 @@ function _helixUpdateTrails(sim: any, wall: any, R: number, yMin: number, yMax: 
         trail.shift();
       }
 
-      // Build segments for this ring's trail. Each segment connects
-      // two consecutive samples in (world_angle = sweep + offset, y)
-      // with per-vertex alpha = 1 − age/fade.
+      // Build PAST segments for this ring's trail. Each segment
+      // connects two consecutive samples in (world_angle = sweep +
+      // offset, y) with per-vertex alpha = 1 − age/fade.
       for (let k = 0; k < trail.length - 1; k++) {
         if (v + 2 > _TRAIL_MAX_VERTS_PER_PARAM) break;
         const a = trail[k];
@@ -428,6 +488,52 @@ function _helixUpdateTrails(sim: any, wall: any, R: number, yMin: number, yMax: 
         colArr[v * 4 + 0] = cr; colArr[v * 4 + 1] = cg;
         colArr[v * 4 + 2] = cb; colArr[v * 4 + 3] = aB;
         v++;
+      }
+
+      // FUTURE segments — only for primary (wall). The wall is
+      // static during a scenario, so we can sample it at angles ahead
+      // of the current sweep and render them with the same alpha ramp
+      // as the past. Boss v11: "the line that represents the vugg
+      // wall distance should fade in both the past as well as the
+      // future direction so it stands out a bit more visually. its a
+      // known constant, so it makes sense that you could predict
+      // where it will be relatively."
+      if (param.primary && N > 0) {
+        const futureSteps = Math.floor(_HELIX_FADE_ANGLE / _HELIX_SAMPLE_STEP);
+        let rPrev = r;  // start from the current value at sweep
+        for (let k = 0; k < futureSteps; k++) {
+          if (v + 2 > _TRAIL_MAX_VERTS_PER_PARAM) break;
+          const futureSweepA = sweep + k * _HELIX_SAMPLE_STEP;
+          const futureSweepB = sweep + (k + 1) * _HELIX_SAMPLE_STEP;
+          const angleA = futureSweepA + offset;
+          const angleB = futureSweepB + offset;
+          const futureAgeA = (k * _HELIX_SAMPLE_STEP) / _HELIX_FADE_ANGLE;
+          const futureAgeB = ((k + 1) * _HELIX_SAMPLE_STEP) / _HELIX_FADE_ANGLE;
+          const aFA = Math.max(0, 1 - futureAgeA);
+          const aFB = Math.max(0, 1 - futureAgeB);
+
+          // Cell at future angles — wall geometry is static so this
+          // is exact prediction, not extrapolation.
+          const wrappedB = ((futureSweepB % TWO_PI) + TWO_PI) % TWO_PI;
+          const cellB = Math.floor(wrappedB / (TWO_PI / N)) % N;
+          const rawB = param.read(sim, wall, i, cellB);
+          const rNext = (typeof rawB === 'number' && !isNaN(rawB)) ? rawB : rPrev;
+
+          posArr[v * 3 + 0] = rPrev * Math.cos(angleA);
+          posArr[v * 3 + 1] = y;
+          posArr[v * 3 + 2] = rPrev * Math.sin(angleA);
+          colArr[v * 4 + 0] = cr; colArr[v * 4 + 1] = cg;
+          colArr[v * 4 + 2] = cb; colArr[v * 4 + 3] = aFA;
+          v++;
+
+          posArr[v * 3 + 0] = rNext * Math.cos(angleB);
+          posArr[v * 3 + 1] = y;
+          posArr[v * 3 + 2] = rNext * Math.sin(angleB);
+          colArr[v * 4 + 0] = cr; colArr[v * 4 + 1] = cg;
+          colArr[v * 4 + 2] = cb; colArr[v * 4 + 3] = aFB;
+          v++;
+          rPrev = rNext;
+        }
       }
     }
 
