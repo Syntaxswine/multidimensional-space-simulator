@@ -1164,67 +1164,76 @@ function _helixUpdateEvents(
 function _helixUpdateCrystalVisibility(
   state: any, sweep: number, wall: any, ringCount: number, ringOffsets: number[],
 ) {
-  if (!state || !state.crystals || !wall) return;
+  if (!state || !state.crystals) return;
+  // v19: per-fragment "helix skin" replaces the v18 per-mesh opacity
+  // loop. The skin shader (see _applyCavityClip in
+  // 99i-renderer-three.ts) computes age per fragment using the
+  // fragment's own world-y → helicoid u-fraction → leading-edge
+  // angle. So a tall crystal that spans several ring heights gets
+  // revealed segment-by-segment as the spiral leading edge crosses
+  // each Y at a different sweep moment, instead of the whole mesh
+  // fading uniformly. Boss caught this watching v18: "the whole
+  // crystal fades in and out at the same time instead of the fade
+  // matching the sweep of the helicoid."
+  //
+  // The per-frame work here is now just three things:
+  //   1. Push the current sweep into uHelixSweep.
+  //   2. Ensure crystal materials are flagged transparent so the
+  //      shader's alpha multiply has an effect (perimorphs already
+  //      are; ordinary crystals are flipped here on first overlay
+  //      render).
+  //   3. Make sure the parent mesh is visible (the shader does its
+  //      own per-fragment discard outside the fade window, so the
+  //      mesh stays visible to the renderer and the shader decides
+  //      what to keep).
+  // The wall + ringOffsets arguments are kept for signature
+  // compatibility with v18's caller but are no longer used here —
+  // they live entirely in the shader's u-fraction math now.
+
+  const clipU = state.clipUniforms;
+  if (clipU) {
+    clipU.uHelixEnabled.value = 1;
+    clipU.uHelixSweep.value = sweep;
+    // yCenter, ySpan, NTurns, Fade are pushed once at context init
+    // (see _helixSyncSkinGeometry); refreshing here too is cheap and
+    // keeps the shader in sync if the cavity geometry was rebuilt
+    // mid-overlay (signature change in _topoHelixOverlayDraw).
+    if (state.helixContext) {
+      const ctx = state.helixContext;
+      clipU.uHelixYCenter.value = (ctx.yMin + ctx.yMax) * 0.5;
+      clipU.uHelixYSpan.value = (ctx.yMax - ctx.yMin) || 1;
+      clipU.uHelixNTurns.value = _HELIX_N_TURNS;
+      clipU.uHelixFade.value = _HELIX_FADE_ANGLE;
+    }
+  }
+
   const children = state.crystals.children;
   if (!children || !children.length) return;
-  const TWO_PI = Math.PI * 2;
-
   for (let i = 0; i < children.length; i++) {
     const mesh = children[i];
     const u = mesh && mesh.userData;
     if (!u || u.isSatellite) continue;          // parents drive shared material
-    const ringIdx = u.ringIdx;
-    const cellIdx = u.cellIdx;
-    if (ringIdx == null || cellIdx == null) continue;
-    if (ringIdx < 0 || ringIdx >= ringCount) continue;
-
-    const ring = wall.rings && wall.rings[ringIdx];
-    const N = ring && ring.length ? ring.length : 0;
-    if (!N) continue;
-
-    const phi = Math.PI * (ringIdx + 0.5) / ringCount;
-    const twist = wall.ringTwistRadians ? wall.ringTwistRadians(phi) : 0;
-    const theta = (TWO_PI * cellIdx) / N + twist;
-    const offset = ringOffsets[ringIdx] || 0;
-
-    // v18: symmetric fade like the wall trail's primary band. age
-    // wraps to [0, 2π); fold to (−π, π] so |age| is the distance to
-    // the sweep moment in either direction. Visible across a half-
-    // turn window (1/4 future fade-in + 1/4 past fade-out), peaking
-    // at the sweep moment. Boss: "the crystals should fade in and
-    // out like the vugg wall." Pre-v18 the crystals only faded out
-    // (asymmetric — invisible until sweep contact, then full op,
-    // then decaying), which gave them a snap-in feel; symmetric
-    // matches the wall and reads as a continuous reveal.
-    let age = (sweep + offset - theta) % TWO_PI;
-    if (age < 0) age += TWO_PI;
-    if (age > Math.PI) age -= TWO_PI;     // fold to (−π, π]
-    const absAge = Math.abs(age);
-
     const natural = (typeof u.naturalOpacity === 'number') ? u.naturalOpacity : 1.0;
-    let op: number;
-    if (absAge <= _HELIX_FADE_ANGLE) {
-      op = natural * (1 - absAge / _HELIX_FADE_ANGLE);
-    } else {
-      op = 0;
-    }
-
     const mat = mesh.material;
     if (mat) {
-      mat.transparent = true;
-      mat.opacity = op;
-      mat.depthWrite = op > 0.5;     // avoid faint ghosts punching the depth buffer
-      mat.needsUpdate = false;       // opacity/transparent don't require recompile
+      mat.transparent = true;             // shader alpha multiply requires this
+      mat.opacity = natural;              // skin shader scales this down
+      mat.depthWrite = natural >= 1.0;    // perimorphs stay back-face-friendly
     }
-    mesh.visible = op > 0.001;
+    mesh.visible = true;
   }
 }
 
 // Restore crystal materials to their natural opacity. Called when the
 // overlay is turned off so the user gets the usual solid-crystal view
-// back without leftover transparency.
+// back without leftover transparency. v19: also disables the skin
+// shader uniform so the per-fragment alpha multiply short-circuits.
 function _helixRestoreCrystalOpacity(state: any) {
-  if (!state || !state.crystals) return;
+  if (!state) return;
+  if (state.clipUniforms && state.clipUniforms.uHelixEnabled) {
+    state.clipUniforms.uHelixEnabled.value = 0;
+  }
+  if (!state.crystals) return;
   const children = state.crystals.children;
   if (!children) return;
   for (let i = 0; i < children.length; i++) {

@@ -169,6 +169,24 @@ function _topoInitThree(canvas: HTMLCanvasElement): any {
       uVugCellRadii: { value: null as any },  // THREE.DataTexture
       uVugCellTexW: { value: 0 },  // = N (cellsPerRing)
       uVugCellTexH: { value: 0 },  // = ringCount
+      // === HELIX-OVERLAY-FORK ADDITION (v19) =========================
+      // See proposals/HELIX-OVERLAY-FORK-CHANGES.md for the full
+      // breadcrumb. Per-fragment "helix skin" on crystal materials:
+      // each surface point computes its own age relative to the
+      // helicoid leading edge AT THAT Y, so the crystal is revealed
+      // segment-by-segment along its height as the spiral sweeps
+      // past, instead of fading uniformly. Pre-v19 used per-mesh
+      // opacity (whole crystal fades together), which the boss
+      // flagged as not matching the sweep visually. Updated by the
+      // helix overlay's per-frame tick (uHelixEnabled = 0 when the
+      // overlay is off, in which case the shader short-circuits).
+      uHelixEnabled: { value: 0 },
+      uHelixSweep: { value: 0 },
+      uHelixYCenter: { value: 0 },
+      uHelixYSpan: { value: 1 },
+      uHelixNTurns: { value: 1 },
+      uHelixFade: { value: Math.PI / 2 },
+      // === END HELIX-OVERLAY-FORK ADDITION ===========================
     },
   };
   return _topoThreeState;
@@ -207,6 +225,14 @@ function _applyCavityClip(material: any, clipUniforms: any) {
     shader.uniforms.uVugCellRadii = clipUniforms.uVugCellRadii;
     shader.uniforms.uVugCellTexW = clipUniforms.uVugCellTexW;
     shader.uniforms.uVugCellTexH = clipUniforms.uVugCellTexH;
+    // === HELIX-OVERLAY-FORK ADDITION (v19) =========================
+    shader.uniforms.uHelixEnabled = clipUniforms.uHelixEnabled;
+    shader.uniforms.uHelixSweep   = clipUniforms.uHelixSweep;
+    shader.uniforms.uHelixYCenter = clipUniforms.uHelixYCenter;
+    shader.uniforms.uHelixYSpan   = clipUniforms.uHelixYSpan;
+    shader.uniforms.uHelixNTurns  = clipUniforms.uHelixNTurns;
+    shader.uniforms.uHelixFade    = clipUniforms.uHelixFade;
+    // === END HELIX-OVERLAY-FORK ADDITION ===========================
     shader.vertexShader = shader.vertexShader.replace(
       '#include <common>',
       '#include <common>\nvarying vec3 vCavityWorldPos;'
@@ -226,6 +252,14 @@ uniform float uVugRadiiByRing[${_MAX_CLIP_RINGS}];
 uniform sampler2D uVugCellRadii;
 uniform float uVugCellTexW;
 uniform float uVugCellTexH;
+// === HELIX-OVERLAY-FORK ADDITION (v19) — helix skin uniforms =====
+uniform float uHelixEnabled;
+uniform float uHelixSweep;
+uniform float uHelixYCenter;
+uniform float uHelixYSpan;
+uniform float uHelixNTurns;
+uniform float uHelixFade;
+// === END HELIX-OVERLAY-FORK ADDITION ============================
 
 // Per-cell cavity hull lookup. The cavity build (see
 // _topoBuildCavityGeometry) places ring r at world-y = -radius * cos(phi_cav)
@@ -269,8 +303,42 @@ float cavityHullRadiusAt(vec3 worldPos) {
       'void main() {',
       `void main() {
   float _vugHullR = cavityHullRadiusAt(vCavityWorldPos);
-  if (length(vCavityWorldPos - uVugCenter) > _vugHullR) discard;`
+  if (length(vCavityWorldPos - uVugCenter) > _vugHullR) discard;
+  // === HELIX-OVERLAY-FORK ADDITION (v19) — per-fragment helix skin ====
+  // Each surface point on the crystal computes its own age relative to
+  // the helicoid leading edge AT THAT Y. The leading-edge world angle
+  // at world-y is sweep + u·2π·N where u is the fragment's Y-fraction
+  // along the cavity's vertical extent — so different parts of a tall
+  // crystal get hit by the sweep at different sweep moments, revealing
+  // the crystal segment-by-segment along its height instead of all at
+  // once. Discards fragments fully outside the half-turn visible
+  // window (saves the rest of the lighting math); alpha multiplied at
+  // the bottom of main(). Short-circuits when uHelixEnabled < 0.5.
+  float _helixSkinAlpha = 1.0;
+  if (uHelixEnabled > 0.5) {
+    float _hu = clamp((vCavityWorldPos.y - uHelixYCenter) / uHelixYSpan + 0.5, 0.0, 1.0);
+    float _hLead = uHelixSweep + _hu * 6.28318530718 * uHelixNTurns;
+    float _hTheta = atan(vCavityWorldPos.z, vCavityWorldPos.x);
+    float _hAge = mod(_hLead - _hTheta, 6.28318530718);
+    if (_hAge > 3.14159265359) _hAge -= 6.28318530718;
+    float _hAbs = abs(_hAge);
+    if (_hAbs > uHelixFade) discard;
+    _helixSkinAlpha = 1.0 - _hAbs / uHelixFade;
+  }
+  // === END HELIX-OVERLAY-FORK ADDITION ===============================`
     );
+    // === HELIX-OVERLAY-FORK ADDITION (v19) — alpha multiply at end ====
+    // Insert before <dithering_fragment> (reliably near end of main).
+    // gl_FragColor.a is final at this point; multiplying by skinAlpha
+    // gives the smooth ramp across the helicoid fade window. The early
+    // discard above keeps the multiplied alpha visible (no skin
+    // contribution if uHelixEnabled is off; skinAlpha stays 1.0).
+    shader.fragmentShader = shader.fragmentShader.replace(
+      '#include <dithering_fragment>',
+      `gl_FragColor.a *= _helixSkinAlpha;
+  #include <dithering_fragment>`
+    );
+    // === END HELIX-OVERLAY-FORK ADDITION ===============================
   };
   // Force shader rebuild on next render.
   material.needsUpdate = true;
