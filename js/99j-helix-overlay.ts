@@ -351,6 +351,14 @@ function _topoHelixOverlayDraw(state: any, sim: any, wall: any) {
       _helixTrails = [];
       _helixTrailLines.length = 0;
     }
+    if (_helixEventsLine) {
+      state.scene.remove(_helixEventsLine);
+      if (_helixEventsLine.geometry && _helixEventsLine.geometry.dispose) _helixEventsLine.geometry.dispose();
+      if (_helixEventsLine.material && _helixEventsLine.material.dispose) _helixEventsLine.material.dispose();
+      _helixEventsLine = null;
+      _helixEvents = [];
+      _helixEventsSig = '';
+    }
     state.helixContext = null;
     // Restore the cavity + crystal meshes hidden while the overlay
     // was running — leaving them invisible after toggle-off would
@@ -663,6 +671,198 @@ function _helixUpdateTrails(sim: any, wall: any, R: number, yMin: number, yMax: 
   }
 }
 
+// =========== EVENT PINGS ==============================================
+// Boss v12 ask: "Nucleation, growth-onset, dissolution, etc. fire
+// bright radial flashes at the (ring, angle, ion) cell where they
+// occurred. Trails decay; events are punctuation."
+//
+// Events are static markers at the cell where they happened — they
+// peak in brightness when the leading edge passes their angle, fade
+// to zero 1/4 turn behind, and stay invisible the rest of the
+// revolution. Re-flash every revolution. Each event holds:
+//   { ringIdx, cellIdx, kind, color }
+// No time-of-occurrence is stored: events are positional markers
+// the helicoid re-reads each turn, the same way the chemistry trails
+// re-sample each turn.
+//
+// Event sources mined out of sim.crystals (where the engine code
+// already records them):
+//   nucleation   — one per crystal at crystal.wall_anchor
+//   dissolution  — one per negative-thickness zone (engines push these
+//                  with thickness_um < 0 at the step the dissolution
+//                  fired; the cell is the crystal's own anchor)
+// Growth-onset is intentionally NOT extracted here — every positive
+// zone would fire one, which on a long sim drowns nucleation +
+// dissolution in noise. Can be layered later behind a legend toggle
+// if the boss wants it; current scope is the two unambiguous state-
+// transitions.
+
+type HelixEvent = {
+  ringIdx: number,
+  cellIdx: number,
+  kind: 'nucleation' | 'dissolution',
+  color: number,
+};
+
+const _HELIX_EVENT_RADIAL_HALF = 6;  // mm — half-length of the radial flash bar
+let _helixEvents: HelixEvent[] = [];
+let _helixEventsSig = '';
+let _helixEventsLine: any = null;
+const _HELIX_EVENTS_MAX_VERTS = 8192;  // 4096 events × 2 verts each — plenty
+
+function _helixHarvestEvents(sim: any): HelixEvent[] {
+  if (!sim || !sim.crystals) return [];
+  const out: HelixEvent[] = [];
+  for (const c of sim.crystals) {
+    if (!c) continue;
+    const anchor = c.wall_anchor;
+    if (!anchor || anchor.ringIdx == null || anchor.cellIdx == null) continue;
+
+    // Nucleation marker — one per crystal at its anchor.
+    out.push({
+      ringIdx: anchor.ringIdx,
+      cellIdx: anchor.cellIdx,
+      kind: 'nucleation',
+      color: 0x55ff66,                   // green
+    });
+
+    // Dissolution markers — every negative-thickness zone is a
+    // dissolution pulse the engine recorded. Different zones can
+    // share the same cell; we keep all of them so the visual
+    // intensity scales with how many dissolutions hit that cell.
+    if (c.zones && c.zones.length) {
+      for (const z of c.zones) {
+        if (z && typeof z.thickness_um === 'number' && z.thickness_um < 0) {
+          out.push({
+            ringIdx: anchor.ringIdx,
+            cellIdx: anchor.cellIdx,
+            kind: 'dissolution',
+            color: 0xff5566,               // red
+          });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function _helixEnsureEventsLine(scene: any) {
+  if (_helixEventsLine) return;
+  const positions = new Float32Array(_HELIX_EVENTS_MAX_VERTS * 3);
+  const colors = new Float32Array(_HELIX_EVENTS_MAX_VERTS * 4);
+  const geom = new THREE.BufferGeometry();
+  const posAttr = new THREE.BufferAttribute(positions, 3);
+  posAttr.setUsage(THREE.DynamicDrawUsage);
+  const colAttr = new THREE.BufferAttribute(colors, 4);
+  colAttr.setUsage(THREE.DynamicDrawUsage);
+  geom.setAttribute('position', posAttr);
+  geom.setAttribute('color', colAttr);
+  geom.setDrawRange(0, 0);
+  const mat = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    depthWrite: false,
+    linewidth: 2,                     // honored on some platforms; cheap to set
+  });
+  _helixEventsLine = new THREE.LineSegments(geom, mat);
+  _helixEventsLine.name = 'helix-events';
+  _helixEventsLine.renderOrder = 2;    // draw above the chemistry trails
+  scene.add(_helixEventsLine);
+}
+
+function _helixUpdateEvents(
+  state: any, sim: any, wall: any, sweep: number,
+  ringCount: number, ringOffsets: number[],
+) {
+  if (!state || !sim || !wall) return;
+  _helixEnsureEventsLine(state.scene);
+
+  // Re-harvest only when the sim's event-bearing state changed.
+  // Cheap signature: crystal count + last crystal's zone count + last
+  // crystal's id. Misses zero-crystal-count → zero-crystal-count
+  // transitions but those don't produce events anyway.
+  const nC = sim.crystals ? sim.crystals.length : 0;
+  let sig = String(nC);
+  if (nC > 0) {
+    const last = sim.crystals[nC - 1];
+    sig += '|' + (last && last.crystal_id || 0) + '|' + (last && last.zones ? last.zones.length : 0);
+  }
+  if (sig !== _helixEventsSig) {
+    _helixEvents = _helixHarvestEvents(sim);
+    _helixEventsSig = sig;
+  }
+
+  if (!_helixEvents.length) {
+    _helixEventsLine.geometry.setDrawRange(0, 0);
+    return;
+  }
+
+  const TWO_PI = Math.PI * 2;
+  const posArr = _helixEventsLine.geometry.attributes.position.array as Float32Array;
+  const colArr = _helixEventsLine.geometry.attributes.color.array as Float32Array;
+  let v = 0;
+
+  for (const ev of _helixEvents) {
+    if (v + 2 > _HELIX_EVENTS_MAX_VERTS) break;
+    const ringIdx = ev.ringIdx;
+    if (ringIdx < 0 || ringIdx >= ringCount) continue;
+
+    const ring = wall.rings && wall.rings[ringIdx];
+    const N = ring && ring.length ? ring.length : 0;
+    if (!N) continue;
+    const cell = ring[ev.cellIdx % N];
+    if (!cell) continue;
+
+    const phi = Math.PI * (ringIdx + 0.5) / ringCount;
+    const twist = wall.ringTwistRadians ? wall.ringTwistRadians(phi) : 0;
+    const theta = (TWO_PI * ev.cellIdx) / N + twist;
+    const offset = ringOffsets[ringIdx] || 0;
+
+    let age = (sweep + offset - theta) % TWO_PI;
+    if (age < 0) age += TWO_PI;
+    if (age > _HELIX_FADE_ANGLE) continue;
+    const alpha = 1 - age / _HELIX_FADE_ANGLE;
+
+    const y = _helixRingY(ringIdx, ringCount, _topoThreeState ? _topoThreeState.helixContext.yMin : -25,
+                          _topoThreeState ? _topoThreeState.helixContext.yMax : 25);
+    const angleWorld = theta + offset;
+
+    // Radial flash: short bar straddling the cell's wall radius. The
+    // wall reading is `base_radius_mm + wall_depth`; place the flash
+    // ±_HELIX_EVENT_RADIAL_HALF mm around that so the marker rides
+    // the wall instead of floating in free fluid.
+    const rWall = (cell.base_radius_mm || 0) + (cell.wall_depth || 0);
+    const rIn = Math.max(0, rWall - _HELIX_EVENT_RADIAL_HALF);
+    const rOut = rWall + _HELIX_EVENT_RADIAL_HALF;
+
+    const cr = ((ev.color >> 16) & 0xff) / 255;
+    const cg = ((ev.color >> 8) & 0xff) / 255;
+    const cb = (ev.color & 0xff) / 255;
+
+    posArr[v * 3 + 0] = rIn * Math.cos(angleWorld);
+    posArr[v * 3 + 1] = y;
+    posArr[v * 3 + 2] = rIn * Math.sin(angleWorld);
+    colArr[v * 4 + 0] = cr;
+    colArr[v * 4 + 1] = cg;
+    colArr[v * 4 + 2] = cb;
+    colArr[v * 4 + 3] = alpha;
+    v++;
+
+    posArr[v * 3 + 0] = rOut * Math.cos(angleWorld);
+    posArr[v * 3 + 1] = y;
+    posArr[v * 3 + 2] = rOut * Math.sin(angleWorld);
+    colArr[v * 4 + 0] = cr;
+    colArr[v * 4 + 1] = cg;
+    colArr[v * 4 + 2] = cb;
+    colArr[v * 4 + 3] = alpha;
+    v++;
+  }
+
+  _helixEventsLine.geometry.setDrawRange(0, v);
+  _helixEventsLine.geometry.attributes.position.needsUpdate = true;
+  _helixEventsLine.geometry.attributes.color.needsUpdate = true;
+}
+
 // =========== SWEEP-WRITES-CRYSTALS ====================================
 // Boss v12 ask: crystals should "spawn visually as the sweep passes —
 // crystal meshes are invisible except in the leading-edge slice;
@@ -783,6 +983,7 @@ function _helixSpinTick(now: number) {
       const c = state.helixContext;
       _helixUpdateTrails(c.sim, c.wall, c.R, c.yMin, c.yMax, c.ringCount, c.ringOffsets);
       _helixUpdateCrystalVisibility(state, _helixSweepAngle, c.wall, c.ringCount, c.ringOffsets);
+      _helixUpdateEvents(state, c.sim, c.wall, _helixSweepAngle, c.ringCount, c.ringOffsets);
     }
     if (state.renderer && state.scene && state.camera) {
       state.renderer.render(state.scene, state.camera);
