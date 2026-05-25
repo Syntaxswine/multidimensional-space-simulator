@@ -2846,6 +2846,13 @@ function _topoRenderThree(sim: any, wall: any, optOverrideSnap?: any, optReplayS
   _topoBuildCavityGeometry(state, renderWall, sim);
   _topoSyncCrystalMeshes(state, sim, renderWall, optReplayStep);
   _topoApplyCameraFromTilt(state, renderWall);
+  // HELIX OVERLAY — see js/99j-helix-overlay.ts. Adds a helicoid
+  // threaded through the cavity, inscribed with one crystal's growth
+  // record. Defensive typeof check so the bundle still boots if 99j
+  // is ever removed.
+  if (typeof _topoHelixOverlayDraw === 'function') {
+    _topoHelixOverlayDraw(state, sim, renderWall);
+  }
   state.renderer.render(state.scene, state.camera);
   return true;
 }
