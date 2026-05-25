@@ -61056,7 +61056,19 @@ function _helixSpinTick(now) {
         const dt = Math.max(0, Math.min(0.1, (now - _helixSpinPrevTime) / 1000));
         const omega = (_HELIX_RPM / 60) * 2 * Math.PI;
         _helixSweepAngle += dt * omega;
-        state.helixGroup.rotation.y = _helixSweepAngle;
+        // v23: negate the surface mesh's rotation so it spins the same
+        // way the data does. Boss caught this at 60 RPM: "the helicoid
+        // seems to spin counterclockwise and the data spins clockwise."
+        // Diagnosis: THREE.rotation.y maps (1,0,0)→(cosθ, 0, −sinθ),
+        // so positive rotation.y decreases atan2(z, x) for surface
+        // vertices (math-clockwise from +Y top-down view). But trail +
+        // crystal positions are computed at (r·cos(sweep+offset), y,
+        // r·sin(sweep+offset)) — increasing sweep INCREASES atan2(z, x).
+        // Same omega in code, opposite visual spin. Negating the
+        // surface rotation matches the data convention. Trail + crystal
+        // math is unchanged; only the (visual-only) helicoid surface
+        // mesh's rotation gets flipped.
+        state.helixGroup.rotation.y = -_helixSweepAngle;
         // v21: advance scenario time at (RPM/60) × STEPS_PER_REV steps
         // per second. Wrap at scenario end so playback loops.
         if (state.helixContext && state.helixContext.sim) {
