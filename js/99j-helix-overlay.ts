@@ -1141,14 +1141,19 @@ function _helixUpdateEvents(
 // crystal meshes are invisible except in the leading-edge slice;
 // materialize for ~1/4 turn after the sweep passes and fade. The
 // helicoid 'writes' them into view." Replaces v10's blanket
-// state.crystals.visible = false.
+// state.crystals.visible = false. Boss v18: "the crystals should
+// fade in and out like the vugg wall" — same symmetric ramp the
+// wall trail uses (zero at −π/2 past, full at sweep moment, zero at
+// +π/2 future).
 //
 // Per (parent) crystal mesh, we know its anchor (ringIdx, cellIdx)
 // from mesh.userData. The world angle of the leading edge at that
 // ring is sweep + ringOffsets[ringIdx]. The crystal's local theta is
-// (2π·cellIdx / N) + ringTwist(phi). The "age" since the sweep
-// passed = (sweep + offset − theta) mod 2π. Inside the fade window
-// → opacity = naturalOpacity · (1 − age/fade); outside → 0.
+// (2π·cellIdx / N) + ringTwist(phi). The "age" relative to sweep =
+// (sweep + offset − theta), folded to (−π, π]: negative = future
+// (sweep hasn't reached the crystal yet, fading in), positive = past
+// (sweep has moved past, fading out). Visible window:
+// |age| ≤ π/2 → opacity = naturalOpacity · (1 − |age|/(π/2)).
 //
 // Satellites share the parent's material reference, so iterating
 // parents-only is enough: writing parent.material.opacity moves the
@@ -1182,13 +1187,24 @@ function _helixUpdateCrystalVisibility(
     const theta = (TWO_PI * cellIdx) / N + twist;
     const offset = ringOffsets[ringIdx] || 0;
 
+    // v18: symmetric fade like the wall trail's primary band. age
+    // wraps to [0, 2π); fold to (−π, π] so |age| is the distance to
+    // the sweep moment in either direction. Visible across a half-
+    // turn window (1/4 future fade-in + 1/4 past fade-out), peaking
+    // at the sweep moment. Boss: "the crystals should fade in and
+    // out like the vugg wall." Pre-v18 the crystals only faded out
+    // (asymmetric — invisible until sweep contact, then full op,
+    // then decaying), which gave them a snap-in feel; symmetric
+    // matches the wall and reads as a continuous reveal.
     let age = (sweep + offset - theta) % TWO_PI;
     if (age < 0) age += TWO_PI;
+    if (age > Math.PI) age -= TWO_PI;     // fold to (−π, π]
+    const absAge = Math.abs(age);
 
     const natural = (typeof u.naturalOpacity === 'number') ? u.naturalOpacity : 1.0;
     let op: number;
-    if (age <= _HELIX_FADE_ANGLE) {
-      op = natural * (1 - age / _HELIX_FADE_ANGLE);
+    if (absAge <= _HELIX_FADE_ANGLE) {
+      op = natural * (1 - absAge / _HELIX_FADE_ANGLE);
     } else {
       op = 0;
     }
