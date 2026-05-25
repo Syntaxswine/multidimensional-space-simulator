@@ -59524,35 +59524,76 @@ function topoToggleThreeRenderer() {
 // ============================================================
 // js/99j-helix-overlay.ts — Helix Record overlay for the 3D vug
 // ============================================================
-// Boss picture: "picture one ring, but it's a helicoid, it spins
-// through the vugg. this is kind of like layering record mode over
-// the 3D vug." So this module takes the existing groove-mode record
-// concept (per-crystal growth history, one entry per zone) and lifts
-// it into a 3D helicoid threaded through the cavity in the topo
-// Three.js scene.
+// Boss model (final, post-v2 feedback):
 //
-// v0 behavior:
-//   - picks the largest crystal in the active sim (by c_length_mm)
-//   - draws a helix curve at radius = 70% of cavity max
-//   - one bead per zone along the helix, color = temperature
-//     (blue cold → red hot), size = sqrt(|thickness_um|), red for
-//     dissolution zones (negative thickness)
-//   - hooks into _topoRenderThree right before the final render call
+//   "outer edge of the helicoid is the maximum value in the range.
+//    some of these values are mapped on to the physical reality of
+//    the vugg, like the value for distance from center would map to
+//    the vugg wall. other dimensions would be mapped on as a more
+//    abstract representation. all the way basic is at the 0 point,
+//    and all the way acidic is at the far end of the helicoid.
+//    temperature high at the outer end, temperature cold on the
+//    inner end of the helicoid.
 //
-// Scope intentionally narrow — no 6-lane ribbon yet, no per-crystal
-// switching UI yet. Once the boss confirms the geometric picture,
-// v1 adds the Rainbow Mellan 6-lane ribbon (Temperature / growth /
-// Fe / Mn / Al / Ti, same as 98-ui-groove.ts) and a crystal-picker.
+//    crystals are represented as plotter points.
 //
-// Bundle integration: SCRIPT-mode TS, top-level decls become globals.
-// Numeric prefix 99j puts this after 99i (the renderer's _topoInitThree
-// + _topoRenderThree). _topoHelixOverlayDraw is called by hand-edited
-// line in 99i — see the "HELIX OVERLAY" marker there.
-let _helixOverlayEnabled = true; // v0 default ON; UI toggle lands later
+//    the vertical dimension corresponds directly with what's going on
+//    in the vugg at that height. its kind of like a spinning spiral
+//    plotter line graph."
+//
+// What the helicoid IS:
+//   - A spinning parameter-space chart embedded in the cavity.
+//   - r ∈ [0, R] where R = cavity wall radius. r=0 = MIN of each
+//     dimension's range; r=R = MAX. Per-dimension polarity:
+//        T:  cold at axis,  hot at outer edge
+//        pH: basic at axis, acidic at outer edge
+//        any cation [Ca, Fe, Mn, …]: low at axis, high at outer
+//        distance-from-center: literally physical; r=R IS the wall
+//   - Y matches vugg height literally — a value plotted at Y=10mm
+//     sits at Y=10mm in the cavity.
+//   - θ is time, advanced by the spin (40 RPM → 2 rev / sim-time-unit
+//     at the sim's 3 sec/unit cadence; one rev per 1.5 s real time).
+//
+// v3 inscriptions (this commit):
+//   - per-ring chemistry profile per parameter — a polyline through
+//     each ring's (r=normalized-value, Y=ring's-actual-Y) point, plus
+//     a radial spoke from the central axis to each point so the
+//     "line going in or out away from the central axis" reads clearly.
+//   - 6 parameters at v3 launch: T / pH / salinity / Ca / Fe / Mn.
+//     Each gets its own colour and a small angular offset so spokes
+//     don't perfectly overlap when values coincide.
+//
+// Removed in v3:
+//   - per-zone outer-edge beads (one crystal's zones spread across Y;
+//     violated the Y = vugg-height rule)
+//   - outer-edge spiral curve (the surface's r=R boundary already
+//     defines the edge; the curve was duplicative)
+//
+// Coming after v3:
+//   - crystal plotter dots at literal (X, Y, Z) of each crystal
+//   - parameter legend / per-parameter range tuning
+//   - optional fade-trail so the spinning needles leave a visible
+//     wake (turning the instantaneous needle into accumulated trace)
+let _helixOverlayEnabled = true;
 const _HELIX_N_TURNS = 3;
-// Dispose every geometry and material owned by a Three.Group / mesh so
-// GPU memory doesn't leak when we rebuild the overlay. Three.js does
-// NOT auto-dispose on remove(), only on explicit .dispose() calls.
+// Parameters surfaced as radial needles. Each entry: an id (used in
+// the chemistry-state signature), a [min, max] normalization window,
+// a colour, and a reader that pulls the per-ring value from the sim.
+// Add parameters here — no other change needed.
+const _HELIX_CHEM_PARAMS = [
+    { id: 'T', label: 'temperature', min: 50, max: 250, color: 0xff5544,
+        read: (sim, i) => (sim.ring_temperatures || [])[i] },
+    { id: 'pH', label: 'pH', min: 2, max: 12, color: 0x9966ee,
+        read: (sim, i) => ((sim.ring_fluids || [])[i] || {}).pH },
+    { id: 'sal', label: 'salinity', min: 0, max: 30, color: 0x44ccdd,
+        read: (sim, i) => ((sim.ring_fluids || [])[i] || {}).salinity },
+    { id: 'Ca', label: 'Ca', min: 0, max: 1000, color: 0x66cc77,
+        read: (sim, i) => ((sim.ring_fluids || [])[i] || {}).Ca },
+    { id: 'Fe', label: 'Fe', min: 0, max: 200, color: 0xee9944,
+        read: (sim, i) => ((sim.ring_fluids || [])[i] || {}).Fe },
+    { id: 'Mn', label: 'Mn', min: 0, max: 100, color: 0xffdd55,
+        read: (sim, i) => ((sim.ring_fluids || [])[i] || {}).Mn },
+];
 function _helixDisposeGroup(g) {
     if (!g)
         return;
@@ -59567,28 +59608,10 @@ function _helixDisposeGroup(g) {
         }
     });
 }
-// Pick the crystal whose growth record we display. v0: largest by
-// c_length_mm with a non-empty zones array. Deterministic given a sim,
-// stable across frames (so we don't rebuild the overlay every tick).
-function _helixPickCrystal(sim) {
-    if (!sim || !sim.crystals)
-        return null;
-    let best = null;
-    for (const c of sim.crystals) {
-        if (!c || !c.zones || !c.zones.length)
-            continue;
-        if (!best || (c.c_length_mm || 0) > (best.c_length_mm || 0))
-            best = c;
-    }
-    return best;
-}
-// Compute helix radius + axial span from the cavity dimensions.
-//
-// Per boss model: the outer edge of the helicoid IS the vugg wall for
-// physically-grounded parameters (e.g., distance-from-center). So R
-// matches max_seen_radius_mm — not a fraction of it. And the vertical
-// span matches the full vugg diameter so "Y on helicoid = Y in vugg"
-// holds literally.
+// R matches the cavity wall (so "outer edge = wall" holds literally
+// for physical parameters). ySpan = vug_diameter_mm so "Y = vugg Y"
+// holds literally. Both fall back to a sensible default if the wall
+// hasn't been built yet (first frame).
 function _helixGeometry(wall) {
     let R;
     if (wall && typeof wall.max_seen_radius_mm === 'number' && wall.max_seen_radius_mm > 0) {
@@ -59603,12 +59626,35 @@ function _helixGeometry(wall) {
     const ySpan = (wall && wall.vug_diameter_mm) ? wall.vug_diameter_mm : 50;
     return { R, ySpan };
 }
-// Main entry — called by _topoRenderThree once per frame. Cheap when
-// nothing changed (signature compare short-circuits rebuild).
+// Ring → world-Y. Cavity builds rings at phi_cav = PI * (r+0.5)/N
+// south-to-north (see _topoBuildCavityGeometry), so ring 0 sits at
+// the bottom and ring N-1 at the top. wallRadius scales the cosine
+// so the equator ring really is near y=0 in cavity-mm units.
+function _helixRingY(ringIndex, ringCount, wallRadius) {
+    const phiCav = Math.PI * (ringIndex + 0.5) / ringCount;
+    return -wallRadius * Math.cos(phiCav);
+}
+// Coarse signature of the chemistry state across rings. Rebuilds the
+// helix only when the per-ring chemistry meaningfully changes (cheap
+// integer hash, not perfect — fine for live edits, exact for static
+// completed sims).
+function _helixChemSig(sim) {
+    if (!sim)
+        return 'none';
+    const rt = sim.ring_temperatures || [];
+    const rf = sim.ring_fluids || [];
+    const parts = [];
+    for (let i = 0; i < Math.max(rt.length, rf.length); i++) {
+        parts.push((rt[i] || 0).toFixed(0));
+        const f = rf[i] || {};
+        parts.push((f.pH || 0).toFixed(1), (f.salinity || 0).toFixed(0), (f.Ca || 0).toFixed(0), (f.Fe || 0).toFixed(0), (f.Mn || 0).toFixed(0));
+    }
+    return parts.join('|');
+}
+// ----- Main entry — called by _topoRenderThree once per frame -----
 function _topoHelixOverlayDraw(state, sim, wall) {
     if (!state)
         return;
-    // Disabled → tear down any existing overlay and stop.
     if (!_helixOverlayEnabled) {
         if (state.helixGroup) {
             state.scene.remove(state.helixGroup);
@@ -59618,162 +59664,145 @@ function _topoHelixOverlayDraw(state, sim, wall) {
         }
         return;
     }
-    const crystal = _helixPickCrystal(sim);
-    if (!crystal)
+    if (!sim || !wall || !wall.ring_count)
         return;
-    const zones = crystal.zones;
-    if (zones.length < 2)
-        return;
-    // Signature: rebuild only when the displayed crystal or its zone
-    // count changes. Mineral name guards against the "two crystals same
-    // id across mode switches" edge case.
-    const sig = `${crystal.mineral}|${crystal.crystal_id}|${zones.length}`;
+    const { R, ySpan } = _helixGeometry(wall);
+    const chemSig = _helixChemSig(sim);
+    const sig = `${R.toFixed(2)}|${ySpan.toFixed(2)}|${wall.ring_count}|${chemSig}`;
     if (state.helixGroup && state.helixSig === sig)
         return;
     if (state.helixGroup) {
         state.scene.remove(state.helixGroup);
         _helixDisposeGroup(state.helixGroup);
     }
-    const { R, ySpan } = _helixGeometry(wall);
     const group = new THREE.Group();
     group.name = 'helix-record';
-    // Helicoid surface — boss redefinition: not just an edge curve but
-    // the actual 2D ruled surface around the central axis. Radial
-    // parameter sweeps from r=0 (the cavity's vertical axis) out to R
-    // (the outer-edge curve drawn below). Angular parameter traces the
-    // same spiral as the curve. The surface looks like a spiral ramp /
-    // screw thread inside the cavity.
-    //
-    // NU radial × NV angular vertices. NV scales with turn count so a
-    // long helix doesn't get blocky. DoubleSide so the surface is
-    // visible from above and below; depthWrite: false to avoid biasing
-    // the transparency sort against the cavity wall behind it.
-    {
-        const NU = 16;
-        const NV = Math.max(180, _HELIX_N_TURNS * 60);
-        const surfPositions = new Float32Array((NU + 1) * (NV + 1) * 3);
-        const surfIndices = [];
-        for (let i = 0; i <= NU; i++) {
-            const ri = (i / NU) * R;
-            for (let j = 0; j <= NV; j++) {
-                const u = j / NV;
-                const phi = u * _HELIX_N_TURNS * Math.PI * 2;
-                const y = (u - 0.5) * ySpan;
-                const vIdx = (i * (NV + 1) + j) * 3;
-                surfPositions[vIdx + 0] = ri * Math.cos(phi);
-                surfPositions[vIdx + 1] = y;
-                surfPositions[vIdx + 2] = ri * Math.sin(phi);
-            }
-        }
-        for (let i = 0; i < NU; i++) {
-            for (let j = 0; j < NV; j++) {
-                const a = i * (NV + 1) + j;
-                const b = a + 1;
-                const c = (i + 1) * (NV + 1) + j;
-                const d = c + 1;
-                // Two triangles per quad.
-                surfIndices.push(a, c, b, b, c, d);
-            }
-        }
-        const surfGeom = new THREE.BufferGeometry();
-        surfGeom.setAttribute('position', new THREE.BufferAttribute(surfPositions, 3));
-        surfGeom.setIndex(surfIndices);
-        surfGeom.computeVertexNormals();
-        const surfMat = new THREE.MeshBasicMaterial({
-            color: 0xf0d5a0,
-            transparent: true,
-            opacity: 0.18,
-            side: THREE.DoubleSide,
-            depthWrite: false,
-        });
-        const surfMesh = new THREE.Mesh(surfGeom, surfMat);
-        group.add(surfMesh);
-    }
-    // Outer-edge curve — finely sampled so the helix reads as smooth even
-    // at sparse zone counts. Sits on the r=R boundary of the helicoid
-    // surface above; the brighter line defines the edge clearly.
-    const SAMPLES = Math.max(120, Math.min(800, zones.length * 6));
-    const pts = [];
-    for (let i = 0; i <= SAMPLES; i++) {
-        const u = i / SAMPLES;
-        const phi = u * _HELIX_N_TURNS * Math.PI * 2;
-        const y = (u - 0.5) * ySpan;
-        pts.push(new THREE.Vector3(R * Math.cos(phi), y, R * Math.sin(phi)));
-    }
-    const curveGeom = new THREE.BufferGeometry().setFromPoints(pts);
-    const curveMat = new THREE.LineBasicMaterial({ color: 0xf0d5a0, transparent: true, opacity: 0.45 });
-    group.add(new THREE.Line(curveGeom, curveMat));
-    // Per-zone bead — color = temperature, size = sqrt(|thickness_um|).
-    const temps = [];
-    const thicks = [];
-    for (const z of zones) {
-        if (typeof z.temperature === 'number')
-            temps.push(z.temperature);
-        thicks.push(Math.abs(z.thickness_um || 0));
-    }
-    const tmin = temps.length ? Math.min.apply(null, temps) : 100;
-    const tmax = temps.length ? Math.max.apply(null, temps) : 200;
-    const trange = Math.max(tmax - tmin, 1);
-    const wmax = Math.max(1, Math.max.apply(null, thicks));
-    // Min/max bead radius in cavity-mm units. Tuned so a 50mm pocket vug
-    // gets visible-but-not-clobbering beads. Helix radius R is ~17mm in
-    // that case, so 0.25-1.4mm beads look right.
-    const BEAD_MIN = Math.max(0.2, R * 0.012);
-    const BEAD_MAX = Math.max(BEAD_MIN * 3, R * 0.085);
-    for (let i = 0; i < zones.length; i++) {
-        const z = zones[i];
-        const u = i / Math.max(zones.length - 1, 1);
-        const phi = u * _HELIX_N_TURNS * Math.PI * 2;
-        const y = (u - 0.5) * ySpan;
-        const sx = R * Math.cos(phi);
-        const sz = R * Math.sin(phi);
-        const tempNorm = (typeof z.temperature === 'number')
-            ? (z.temperature - tmin) / trange
-            : 0.5;
-        const hue = (1 - tempNorm) * 240 / 360; // 240° (blue) cold → 0° (red) hot
-        const isDissolution = (z.thickness_um || 0) < 0;
-        const sizeNorm = Math.sqrt(Math.abs(z.thickness_um || 0) / wmax);
-        const rBead = BEAD_MIN + sizeNorm * (BEAD_MAX - BEAD_MIN);
-        const color = new THREE.Color();
-        if (isDissolution)
-            color.setHex(0xcc4444);
-        else
-            color.setHSL(hue, 0.7, 0.55);
-        const emissive = color.clone().multiplyScalar(0.25);
-        const beadGeom = new THREE.SphereGeometry(rBead, 10, 7);
-        const beadMat = new THREE.MeshStandardMaterial({
-            color, emissive, roughness: 0.55, metalness: 0.1,
-        });
-        const bead = new THREE.Mesh(beadGeom, beadMat);
-        bead.position.set(sx, y, sz);
-        bead.userData.zoneIndex = i;
-        bead.userData.zone = z;
-        group.add(bead);
-    }
+    _helixAddSurface(group, R, ySpan);
+    _helixAddChemistryProfiles(group, sim, wall, R);
+    // Carry the in-flight rotation across rebuilds so chemistry changes
+    // don't snap the helix back to angle 0.
+    if (typeof _helixRotationY === 'number')
+        group.rotation.y = _helixRotationY;
     state.scene.add(group);
     state.helixGroup = group;
     state.helixSig = sig;
-    // Carry over the in-flight rotation so a rebuild (crystal change,
-    // zone-count tick) doesn't snap the helix back to angle 0.
-    if (typeof _helixRotationY === 'number')
-        group.rotation.y = _helixRotationY;
     _helixStartSpin();
 }
+// ----- Sub-builders ------------------------------------------------
+// Translucent gold helicoid surface — the parameter-space canvas.
+// (r, θ) → (r cos θ, (θ/2πN - 0.5)·ySpan, r sin θ). Spans from the
+// central axis (r=0) out to the cavity wall (r=R), N_TURNS over the
+// full vertical span.
+function _helixAddSurface(group, R, ySpan) {
+    const NU = 16;
+    const NV = Math.max(180, _HELIX_N_TURNS * 60);
+    const surfPositions = new Float32Array((NU + 1) * (NV + 1) * 3);
+    const surfIndices = [];
+    for (let i = 0; i <= NU; i++) {
+        const ri = (i / NU) * R;
+        for (let j = 0; j <= NV; j++) {
+            const u = j / NV;
+            const phi = u * _HELIX_N_TURNS * Math.PI * 2;
+            const y = (u - 0.5) * ySpan;
+            const vIdx = (i * (NV + 1) + j) * 3;
+            surfPositions[vIdx + 0] = ri * Math.cos(phi);
+            surfPositions[vIdx + 1] = y;
+            surfPositions[vIdx + 2] = ri * Math.sin(phi);
+        }
+    }
+    for (let i = 0; i < NU; i++) {
+        for (let j = 0; j < NV; j++) {
+            const a = i * (NV + 1) + j;
+            const b = a + 1;
+            const c = (i + 1) * (NV + 1) + j;
+            const d = c + 1;
+            surfIndices.push(a, c, b, b, c, d);
+        }
+    }
+    const surfGeom = new THREE.BufferGeometry();
+    surfGeom.setAttribute('position', new THREE.BufferAttribute(surfPositions, 3));
+    surfGeom.setIndex(surfIndices);
+    surfGeom.computeVertexNormals();
+    const surfMat = new THREE.MeshBasicMaterial({
+        color: 0xf0d5a0,
+        transparent: true,
+        opacity: 0.15,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+    });
+    group.add(new THREE.Mesh(surfGeom, surfMat));
+}
+// Per-parameter chemistry needles + vertical profile lines.
+// At each ring (vugg height Y_i), for each parameter:
+//   r_i = R * clamp((value - param.min) / (param.max - param.min), 0, 1)
+//   spoke from (0, Y_i, 0) → (r_i·cos φ_p, Y_i, r_i·sin φ_p)
+//   dot at the spoke tip
+// Then a polyline connects the same parameter's dots across rings —
+// the vertical profile of that parameter through the cavity.
+// φ_p is a small per-parameter angular offset so coincident values
+// don't perfectly overlap. Total spread is ~30° across all params.
+function _helixAddChemistryProfiles(group, sim, wall, R) {
+    if (!sim || !wall || !wall.ring_count)
+        return;
+    const ringCount = wall.ring_count;
+    const wallRadius = wall.max_seen_radius_mm
+        || (wall.vug_diameter_mm ? wall.vug_diameter_mm * 0.5 : R);
+    const nParams = _HELIX_CHEM_PARAMS.length;
+    const SPREAD = Math.PI / 6; // 30° total angular spread for the param fan
+    const DOT_RADIUS = Math.max(0.2, R * 0.012);
+    const SPOKE_OPACITY = 0.35;
+    const PROFILE_OPACITY = 0.85;
+    for (let p = 0; p < nParams; p++) {
+        const param = _HELIX_CHEM_PARAMS[p];
+        const phi = (nParams === 1) ? 0 : ((p / (nParams - 1)) - 0.5) * SPREAD;
+        const cosP = Math.cos(phi);
+        const sinP = Math.sin(phi);
+        const profilePts = [];
+        for (let i = 0; i < ringCount; i++) {
+            const raw = param.read(sim, i);
+            if (typeof raw !== 'number' || isNaN(raw))
+                continue;
+            const norm = Math.max(0, Math.min(1, (raw - param.min) / (param.max - param.min)));
+            const r = norm * R;
+            const y = _helixRingY(i, ringCount, wallRadius);
+            const tipX = r * cosP, tipZ = r * sinP;
+            // Spoke from axis to the dot — the radial "line going out from
+            // the central axis" the boss explicitly asked for.
+            const spokeGeom = new THREE.BufferGeometry().setFromPoints([
+                new THREE.Vector3(0, y, 0),
+                new THREE.Vector3(tipX, y, tipZ),
+            ]);
+            const spokeMat = new THREE.LineBasicMaterial({
+                color: param.color, transparent: true, opacity: SPOKE_OPACITY,
+            });
+            group.add(new THREE.Line(spokeGeom, spokeMat));
+            // Bright dot at the spoke tip.
+            const dotGeom = new THREE.SphereGeometry(DOT_RADIUS, 8, 6);
+            const dotMat = new THREE.MeshBasicMaterial({ color: param.color });
+            const dot = new THREE.Mesh(dotGeom, dotMat);
+            dot.position.set(tipX, y, tipZ);
+            group.add(dot);
+            profilePts.push(new THREE.Vector3(tipX, y, tipZ));
+        }
+        // Connect the parameter's per-ring dots with a vertical profile
+        // line so the height-profile reads clearly even when the spokes
+        // are hidden behind the cavity wall from one angle.
+        if (profilePts.length >= 2) {
+            const profGeom = new THREE.BufferGeometry().setFromPoints(profilePts);
+            const profMat = new THREE.LineBasicMaterial({
+                color: param.color, transparent: true, opacity: PROFILE_OPACITY,
+            });
+            group.add(new THREE.Line(profGeom, profMat));
+        }
+    }
+}
 // =========== SPINNING ==========================================
-// Boss model: θ = time, advanced by spinning. The helicoid rotates
-// rigidly around the central (Y) axis; data inscriptions ride with it.
-//
-// v2 implements the rotation only. The data the helicoid carries
-// (per-tick chemistry traces at literal vugg heights, crystal plotter
-// points) lands in v3 — until then the existing per-zone outer-edge
-// beads ride along as visible eye-candy. They're geometrically wrong
-// per the boss model (one crystal's zones spread across Y instead of
-// living at the crystal's actual height); flagged for replacement.
+// Boss spec: 2 rotations per sim-time-unit; sim runs at 3 sec / unit,
+// so 1 rotation per 1.5 sec real time = 40 RPM.
 let _helixSpinRAF = null;
 let _helixSpinPrevTime = 0;
 let _helixRotationY = 0;
-const _HELIX_RPM = 6; // 6 revolutions per minute → 36°/sec — visible
-// but not dizzying. Single tunable for now.
+const _HELIX_RPM = 40;
 function _helixStartSpin() {
     if (_helixSpinRAF != null)
         return;
@@ -59786,10 +59815,8 @@ function _helixSpinTick(now) {
         _helixSpinRAF = null;
         return;
     }
-    // Only spin when the WebGL canvas is actually visible — pauses the
-    // RAF cost on the title screen, in Creative mode, etc. Checks the
-    // canvas's offsetParent (null when display:none anywhere in the
-    // ancestor chain).
+    // Only spin when the WebGL canvas is actually visible — pauses RAF
+    // cost on the title screen, Creative mode, etc.
     const c3 = document.getElementById('topo-canvas-three');
     const visible = c3 && c3.offsetParent != null && c3.style.display !== 'none';
     if (visible) {
@@ -59804,12 +59831,10 @@ function _helixSpinTick(now) {
     _helixSpinPrevTime = now;
     _helixSpinRAF = requestAnimationFrame(_helixSpinTick);
 }
-// Toggle handler — surfaced to the eventual UI button. Forces a rebuild
-// on next render by clearing the cached signature.
+// Toggle handler — wired to a future UI button. Forces the next
+// _topoRenderThree to run helix logic regardless of cache.
 function helixOverlayToggle() {
     _helixOverlayEnabled = !_helixOverlayEnabled;
-    // Force the next _topoRenderThree to actually run helix logic even
-    // if the sim didn't change.
     if (typeof topoRender === 'function')
         topoRender();
 }
