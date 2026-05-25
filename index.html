@@ -58825,6 +58825,11 @@ function _emitClusterSatellites(state, crystal, geom, mat, ax, ay, az, nx, ny, n
             ringIdx: _anchor.ringIdx,
             cellIdx: _anchor.cellIdx,
             isSatellite: true,
+            // helix v13: satellites share the parent's material reference,
+            // so the parent's opacity write also moves the satellites. The
+            // naturalOpacity here is for completeness; the helix update
+            // iterates parents only.
+            naturalOpacity: mat.transparent ? mat.opacity : 1.0,
         };
         satMesh.renderOrder = 1;
         state.crystals.add(satMesh);
@@ -59296,6 +59301,12 @@ function _topoSyncCrystalMeshes(state, sim, wall, replayStep) {
             mineral: effectiveMineral,
             ringIdx,
             cellIdx,
+            // helix v13 sweep-writes-crystals: the helix overlay multiplies
+            // the material opacity by a 0→1 sweep factor as the leading
+            // edge passes this anchor. The "natural" opacity (1.0 for
+            // ordinary crystals, 0.42 for perimorph casts) is captured here
+            // so the overlay-off path can restore it without re-deriving.
+            naturalOpacity: isPerimorphCast ? 0.42 : 1.0,
         };
         state.crystals.add(mesh);
         // Phase E5b: emit cluster satellites around this parent. Same
@@ -59930,20 +59941,28 @@ function _topoHelixOverlayDraw(state, sim, wall) {
             state.cavity.visible = true;
         if (state.crystals)
             state.crystals.visible = true;
+        _helixRestoreCrystalOpacity(state);
         return;
     }
     if (!sim || !wall || !wall.ring_count)
         return;
     // Boss v10: "no visible 3d vug, the only indication of the vugg
     // shape is the reading at the wall of the vugg where it intersects
-    // with the helicoid at that moment in time." Hide both the cavity
-    // mesh and crystal meshes — the white primary wall-distance trail
-    // (per-cell, fading 1/4 turn behind the sweep) reveals the cavity
-    // shape from radar returns alone.
+    // with the helicoid at that moment in time." Hide the cavity mesh
+    // — the white primary wall-distance trail (per-cell, fading 1/4
+    // turn behind the sweep) reveals the cavity shape from radar
+    // returns alone.
+    //
+    // v13: crystals stay in the scene but the helix update writes their
+    // material opacity from the sweep age (see
+    // _helixUpdateCrystalVisibility). Replaces v10's blanket
+    // crystals.visible=false. Boss: "crystals only spawn visually as
+    // the sweep passes — materialize for ~1/4 turn after the sweep
+    // passes and fade."
     if (state.cavity)
         state.cavity.visible = false;
     if (state.crystals)
-        state.crystals.visible = false;
+        state.crystals.visible = true;
     const { R, wallRadius, yMin, yMax, ySpan } = _helixGeometry(state, wall);
     const ringCount = wall.ring_count;
     const sig = `${R.toFixed(2)}|${yMin.toFixed(2)}|${yMax.toFixed(2)}|${ringCount}`;
@@ -60215,6 +60234,96 @@ function _helixUpdateTrails(sim, wall, R, yMin, yMax, ringCount, ringOffsets) {
         lines.geometry.attributes.color.needsUpdate = true;
     }
 }
+// =========== SWEEP-WRITES-CRYSTALS ====================================
+// Boss v12 ask: crystals should "spawn visually as the sweep passes —
+// crystal meshes are invisible except in the leading-edge slice;
+// materialize for ~1/4 turn after the sweep passes and fade. The
+// helicoid 'writes' them into view." Replaces v10's blanket
+// state.crystals.visible = false.
+//
+// Per (parent) crystal mesh, we know its anchor (ringIdx, cellIdx)
+// from mesh.userData. The world angle of the leading edge at that
+// ring is sweep + ringOffsets[ringIdx]. The crystal's local theta is
+// (2π·cellIdx / N) + ringTwist(phi). The "age" since the sweep
+// passed = (sweep + offset − theta) mod 2π. Inside the fade window
+// → opacity = naturalOpacity · (1 − age/fade); outside → 0.
+//
+// Satellites share the parent's material reference, so iterating
+// parents-only is enough: writing parent.material.opacity moves the
+// satellites too. Iterating satellites separately would re-write the
+// same material with a slightly different cellIdx-derived theta (the
+// satellite's offset around the cluster), causing flicker.
+function _helixUpdateCrystalVisibility(state, sweep, wall, ringCount, ringOffsets) {
+    if (!state || !state.crystals || !wall)
+        return;
+    const children = state.crystals.children;
+    if (!children || !children.length)
+        return;
+    const TWO_PI = Math.PI * 2;
+    for (let i = 0; i < children.length; i++) {
+        const mesh = children[i];
+        const u = mesh && mesh.userData;
+        if (!u || u.isSatellite)
+            continue; // parents drive shared material
+        const ringIdx = u.ringIdx;
+        const cellIdx = u.cellIdx;
+        if (ringIdx == null || cellIdx == null)
+            continue;
+        if (ringIdx < 0 || ringIdx >= ringCount)
+            continue;
+        const ring = wall.rings && wall.rings[ringIdx];
+        const N = ring && ring.length ? ring.length : 0;
+        if (!N)
+            continue;
+        const phi = Math.PI * (ringIdx + 0.5) / ringCount;
+        const twist = wall.ringTwistRadians ? wall.ringTwistRadians(phi) : 0;
+        const theta = (TWO_PI * cellIdx) / N + twist;
+        const offset = ringOffsets[ringIdx] || 0;
+        let age = (sweep + offset - theta) % TWO_PI;
+        if (age < 0)
+            age += TWO_PI;
+        const natural = (typeof u.naturalOpacity === 'number') ? u.naturalOpacity : 1.0;
+        let op;
+        if (age <= _HELIX_FADE_ANGLE) {
+            op = natural * (1 - age / _HELIX_FADE_ANGLE);
+        }
+        else {
+            op = 0;
+        }
+        const mat = mesh.material;
+        if (mat) {
+            mat.transparent = true;
+            mat.opacity = op;
+            mat.depthWrite = op > 0.5; // avoid faint ghosts punching the depth buffer
+            mat.needsUpdate = false; // opacity/transparent don't require recompile
+        }
+        mesh.visible = op > 0.001;
+    }
+}
+// Restore crystal materials to their natural opacity. Called when the
+// overlay is turned off so the user gets the usual solid-crystal view
+// back without leftover transparency.
+function _helixRestoreCrystalOpacity(state) {
+    if (!state || !state.crystals)
+        return;
+    const children = state.crystals.children;
+    if (!children)
+        return;
+    for (let i = 0; i < children.length; i++) {
+        const mesh = children[i];
+        const u = mesh && mesh.userData;
+        if (!u)
+            continue;
+        const natural = (typeof u.naturalOpacity === 'number') ? u.naturalOpacity : 1.0;
+        const mat = mesh.material;
+        if (mat) {
+            mat.opacity = natural;
+            mat.transparent = natural < 1;
+            mat.depthWrite = true;
+        }
+        mesh.visible = true;
+    }
+}
 // =========== SPINNING ==========================================
 let _helixSpinRAF = null;
 let _helixSpinPrevTime = 0;
@@ -60242,6 +60351,7 @@ function _helixSpinTick(now) {
         if (state.helixContext) {
             const c = state.helixContext;
             _helixUpdateTrails(c.sim, c.wall, c.R, c.yMin, c.yMax, c.ringCount, c.ringOffsets);
+            _helixUpdateCrystalVisibility(state, _helixSweepAngle, c.wall, c.ringCount, c.ringOffsets);
         }
         if (state.renderer && state.scene && state.camera) {
             state.renderer.render(state.scene, state.camera);

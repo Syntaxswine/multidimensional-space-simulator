@@ -2135,6 +2135,11 @@ function _emitClusterSatellites(
       ringIdx: _anchor.ringIdx,
       cellIdx: _anchor.cellIdx,
       isSatellite: true,
+      // helix v13: satellites share the parent's material reference,
+      // so the parent's opacity write also moves the satellites. The
+      // naturalOpacity here is for completeness; the helix update
+      // iterates parents only.
+      naturalOpacity: mat.transparent ? mat.opacity : 1.0,
     };
     satMesh.renderOrder = 1;
     state.crystals.add(satMesh);
@@ -2599,6 +2604,12 @@ function _topoSyncCrystalMeshes(state: any, sim: any, wall: any, replayStep?: nu
       mineral: effectiveMineral,
       ringIdx,
       cellIdx,
+      // helix v13 sweep-writes-crystals: the helix overlay multiplies
+      // the material opacity by a 0→1 sweep factor as the leading
+      // edge passes this anchor. The "natural" opacity (1.0 for
+      // ordinary crystals, 0.42 for perimorph casts) is captured here
+      // so the overlay-off path can restore it without re-deriving.
+      naturalOpacity: isPerimorphCast ? 0.42 : 1.0,
     };
 
     state.crystals.add(mesh);
