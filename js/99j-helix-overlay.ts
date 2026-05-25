@@ -153,6 +153,65 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
 const _HELIX_FADE_ANGLE = Math.PI / 2;   // 1/4 turn — boss spec
 const _HELIX_SAMPLE_STEP = Math.PI / 90;  // sample every 2° of sweep
 
+// =========== HISTORICAL READ (helix v15) ==============================
+// Boss decision: helicoid sweep doubles as a scenario-time replay
+// — one full revolution at 40 RPM (1.5 s) cycles the whole scenario
+// from step 0 to last step. The per-ring chemistry + temperature
+// snaps captured into wall_state_history (see 85c) feed the trail
+// samples, so consecutive samples that span a snap boundary carry a
+// real Δr. That signal is what the rate band needs to light up;
+// without history, Δr stayed at 0 because the trail re-sampled the
+// same frozen post-sim state every frame.
+
+// Map current sweep angle → wall_state_history index. Wraps each
+// revolution so the playback loops. Returns null when no history
+// exists (creative mode mid-edit, or pre-sim), letting the live-sim
+// fallback path keep working.
+function _helixSnapAt(sim: any, sweep: number): any {
+  const history = sim && sim.wall_state_history;
+  if (!history || !history.length) return null;
+  const TWO_PI = Math.PI * 2;
+  const wrapped = ((sweep % TWO_PI) + TWO_PI) % TWO_PI;
+  let idx = Math.floor((wrapped / TWO_PI) * history.length);
+  if (idx < 0) idx = 0;
+  if (idx >= history.length) idx = history.length - 1;
+  return history[idx];
+}
+
+// Build a tiny sim-shaped proxy whose ring_fluids + ring_temperatures
+// come from the snap. The existing param.read functions only touch
+// these two arrays on sim, so a thin shim is enough — no need to
+// rewrite every read.
+function _helixSimAtSnap(sim: any, snap: any): any {
+  if (!snap) return sim;
+  if (!snap.ring_fluids && !snap.ring_temperatures) return sim;
+  return {
+    ring_fluids: snap.ring_fluids || sim.ring_fluids,
+    ring_temperatures: snap.ring_temperatures || sim.ring_temperatures,
+  };
+}
+
+// Same idea for wall: the wall primary reads cell.base_radius_mm +
+// cell.wall_depth, which the snap rings already carry (see 85c snap
+// schema). Returns a thin proxy that keeps ring_count + cells_per_ring
+// from the live wall (sim-invariant) but routes ring lookups through
+// the snap, so the wall trail itself rewinds with scenario time.
+function _helixWallAtSnap(wall: any, snap: any): any {
+  if (!snap || !snap.rings) return wall;
+  return {
+    rings: snap.rings,
+    ring_count: wall && wall.ring_count,
+    cells_per_ring: wall && wall.cells_per_ring,
+    ringTwistRadians: wall && wall.ringTwistRadians,
+    polarProfileFactor: wall && wall.polarProfileFactor,
+    max_seen_radius_mm: wall && wall.max_seen_radius_mm,
+    vug_diameter_mm: wall && wall.vug_diameter_mm,
+  };
+}
+
+const _HELIX_RATE_BAND_RADIUS_FRACTION = 0.95;  // outer edge of band
+const _HELIX_RATE_BAND_MIN_NORM = 0.04;          // below this, rate is hidden
+
 // =========== LEGEND ====================================================
 // Boss v12 ask: side legend, hover-to-identify, show-only-active, and
 // highlight-movers — and the legend rows toggle individual params on
@@ -467,11 +526,11 @@ let _helixTrailGroup: any = null;
 const _helixTrailLines: any[] = [];
 
 // 16 rings × ~45 past samples × 2 verts per segment = 1440 verts per
-// secondary param. PRIMARY also renders 45 future segments (wall is
-// static so we can predict): 16 × (45 past + 45 future) × 2 = 2880
-// verts. 4096 budget gives ~40% headroom for primary, plenty for
-// secondaries.
-const _TRAIL_MAX_VERTS_PER_PARAM = 4096;
+// secondary param. PRIMARY also renders 45 future segments: 16 × (45
+// past + 45 future) × 2 = 2880 verts. v15 layers a dashed rate-band
+// on secondaries: ~720 more verts. 6144 budget gives ~30% headroom on
+// primary and ~20% on rate-bearing secondaries.
+const _TRAIL_MAX_VERTS_PER_PARAM = 6144;
 
 function _helixClearTrails() {
   for (let p = 0; p < _helixTrails.length; p++) {
@@ -537,6 +596,14 @@ function _helixUpdateTrails(sim: any, wall: any, R: number, yMin: number, yMax: 
   const TWO_PI = Math.PI * 2;
   const sweepWrapped = ((sweep % TWO_PI) + TWO_PI) % TWO_PI;
 
+  // v15: route the per-frame value sample through the snap that
+  // corresponds to the current sweep angle. If history is present,
+  // the trail samples become a scenario-time replay; if not, the
+  // proxies fall through to the live sim (Creative Mode / mid-run).
+  const snap = _helixSnapAt(sim, sweep);
+  const histSim = _helixSimAtSnap(sim, snap);
+  const histWall = _helixWallAtSnap(wall, snap);
+
   for (let p = 0; p < nParams; p++) {
     const param = _HELIX_CHEM_PARAMS[p];
     const lines = _helixTrailLines[p];
@@ -559,12 +626,13 @@ function _helixUpdateTrails(sim: any, wall: any, R: number, yMin: number, yMax: 
     let v = 0;
 
     for (let i = 0; i < ringCount; i++) {
-      // Sample value at this ring
-      const ringArr = (wall.rings && wall.rings[i]) || null;
+      // Sample value at this ring. histWall.rings is the snap's ring
+      // array when history is active; otherwise it's the live wall's.
+      const ringArr = (histWall.rings && histWall.rings[i]) || null;
       const N = ringArr && ringArr.length ? ringArr.length : 0;
       const cellIdx = N > 0 ? Math.floor(sweepWrapped / (TWO_PI / N)) % N : 0;
 
-      const raw = param.read(sim, wall, i, cellIdx);
+      const raw = param.read(histSim, histWall, i, cellIdx);
       if (typeof raw !== 'number' || isNaN(raw)) continue;
       // Primary plots at literal world-mm (traces the actual wall);
       // secondaries normalize their value into [0, R].
@@ -618,6 +686,54 @@ function _helixUpdateTrails(sim: any, wall: any, R: number, yMin: number, yMax: 
         v++;
       }
 
+      // RATE BAND — v15. Secondary params only (wall is plotted at
+      // literal mm and is the *primary* anchor; rate is layered on
+      // top of the chemistry channels). For each pair of consecutive
+      // trail samples that span a wall_state_history boundary, |Δr|
+      // is non-zero — that's the signal. Plot at r = |Δr| in the
+      // same normalized [0, R] space the main trail uses; render
+      // every-other segment for a dashed look, 0.7× the main alpha
+      // so it reads as a side channel.
+      //
+      // Use case: trace ions (U at 0-5 mg/L, Te at 0-5, Hg at 0-5)
+      // have main trails hugging the axis even at a spike. A 1 mg/L
+      // jump in U at scenario step k produces a band bump at
+      // r = R·0.2 — visible far from the axis even though the
+      // value-trail itself barely moves.
+      if (!param.primary && trail.length >= 2) {
+        const stride = 2;  // dashed: render pairs (0-1), (2-3), …
+        const minR = _HELIX_RATE_BAND_MIN_NORM * R;
+        for (let k = 0; k + 1 < trail.length; k += stride) {
+          if (v + 2 > _TRAIL_MAX_VERTS_PER_PARAM) break;
+          const a = trail[k];
+          const b = trail[k + 1];
+          const rateMag = Math.abs(b.r - a.r);
+          if (rateMag < minR) continue;
+          const rBand = Math.min(R * _HELIX_RATE_BAND_RADIUS_FRACTION, rateMag);
+
+          const ageA = (sweep - a.sweep) / _HELIX_FADE_ANGLE;
+          const ageB = (sweep - b.sweep) / _HELIX_FADE_ANGLE;
+          const aA = Math.max(0, 1 - ageA) * 0.7;
+          const aB = Math.max(0, 1 - ageB) * 0.7;
+          const angleA = a.sweep + offset;
+          const angleB = b.sweep + offset;
+
+          posArr[v * 3 + 0] = rBand * Math.cos(angleA);
+          posArr[v * 3 + 1] = y;
+          posArr[v * 3 + 2] = rBand * Math.sin(angleA);
+          colArr[v * 4 + 0] = cr; colArr[v * 4 + 1] = cg;
+          colArr[v * 4 + 2] = cb; colArr[v * 4 + 3] = aA;
+          v++;
+
+          posArr[v * 3 + 0] = rBand * Math.cos(angleB);
+          posArr[v * 3 + 1] = y;
+          posArr[v * 3 + 2] = rBand * Math.sin(angleB);
+          colArr[v * 4 + 0] = cr; colArr[v * 4 + 1] = cg;
+          colArr[v * 4 + 2] = cb; colArr[v * 4 + 3] = aB;
+          v++;
+        }
+      }
+
       // FUTURE segments — only for primary (wall). The wall is
       // static during a scenario, so we can sample it at angles ahead
       // of the current sweep and render them with the same alpha ramp
@@ -640,11 +756,16 @@ function _helixUpdateTrails(sim: any, wall: any, R: number, yMin: number, yMax: 
           const aFA = Math.max(0, 1 - futureAgeA);
           const aFB = Math.max(0, 1 - futureAgeB);
 
-          // Cell at future angles — wall geometry is static so this
-          // is exact prediction, not extrapolation.
+          // Cell at future angles. v15: wall evolves with scenario
+          // time, so sample the future snap (sweep + Δ → its own
+          // historical step) rather than current snap. Still exact
+          // prediction: the sim already completed, we know the future.
           const wrappedB = ((futureSweepB % TWO_PI) + TWO_PI) % TWO_PI;
           const cellB = Math.floor(wrappedB / (TWO_PI / N)) % N;
-          const rawB = param.read(sim, wall, i, cellB);
+          const snapB = _helixSnapAt(sim, futureSweepB);
+          const histSimB = _helixSimAtSnap(sim, snapB);
+          const histWallB = _helixWallAtSnap(wall, snapB);
+          const rawB = param.read(histSimB, histWallB, i, cellB);
           const rNext = (typeof rawB === 'number' && !isNaN(rawB)) ? rawB : rPrev;
 
           posArr[v * 3 + 0] = rPrev * Math.cos(angleA);

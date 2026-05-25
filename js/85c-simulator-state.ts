@@ -283,6 +283,15 @@ _diffuseRingState(rate?) {
       fluid: _cloneFluid(cnd.fluid),
     },
     radiation_dose: this.radiation_dose,
+    // helix v15: per-ring chemistry + temperature trajectory. The
+    // helicoid overlay's rate band sources from these snaps so its
+    // temporal Δr reflects scenario time, not (frozen) view time.
+    // Storage cost: 16 rings × ~50 fluid fields × 8 B = ~6.4 KB per
+    // snap; for a 120-step MVT (stride 9 → ~14 snaps) that's ~90 KB
+    // beyond the existing v66 schema. Smaller scenarios cost less;
+    // 2400-step pegmatites cost ~190 KB.
+    ring_fluids: this.ring_fluids ? this.ring_fluids.map((f: any) => _cloneFluid(f)) : null,
+    ring_temperatures: this.ring_temperatures ? this.ring_temperatures.slice() : null,
   };
   for (let r = 0; r < ringCount; r++) {
     const ring = this.wall_state.rings[r];
