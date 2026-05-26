@@ -295,6 +295,15 @@ _diffuseRingState(rate?) {
     ring_fluids: this.ring_fluids ? this.ring_fluids.map((f: any) => _cloneFluid(f)) : null,
     ring_temperatures: this.ring_temperatures ? this.ring_temperatures.slice() : null,
     // === END HELIX-OVERLAY-FORK ADDITION ==============================
+    // === HELIX-OVERLAY-FORK ADDITION (Week 3 carbonate) ===============
+    // f_ord chip in the Carbonate System legend section reads cycle
+    // count from the snap so replays show the ordering trajectory the
+    // scenario actually walked through, not just the final value on
+    // the live conditions object. Single scalar (fluid-level on
+    // VugConditions per the Kim 2023 mechanism in 25-chemistry-
+    // conditions.ts:49) — cheap; ~8 B per snap.
+    _dol_cycle_count: (cnd && cnd._dol_cycle_count) || 0,
+    // === END HELIX-OVERLAY-FORK ADDITION ==============================
   };
   for (let r = 0; r < ringCount; r++) {
     const ring = this.wall_state.rings[r];

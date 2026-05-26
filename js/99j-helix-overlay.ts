@@ -184,6 +184,24 @@ const _HELIX_FULL_NAMES: { [id: string]: string } = {
   Au:       'Gold',
   Hg:       'Mercury',
   Sn:       'Tin',
+  // === HELIX-OVERLAY-FORK ADDITION (Week 3 carbonate) ===============
+  // PROPOSAL-CARBONATE-GEOCHEM Phase 1 Week 3 — Carbonate System
+  // legend section. 11 chips consuming the Bjerrum partition (20b),
+  // Ksp(T) (20c), and SI engine (32b) all shipped in Weeks 1-2 as
+  // observer-only reads. The chip itself is the symbol; hover shows
+  // the full name + unit per the v24 tooltip convention.
+  DIC:           'Dissolved Inorganic Carbon (total, mg/L)',
+  CO2aq:        'Dissolved CO₂ (H₂CO₃*, mg/L)',
+  HCO3:         'Bicarbonate (HCO₃⁻, mg/L)',
+  CO3_2:        'Carbonate ion (CO₃²⁻, mg/L)',
+  SI_calcite:   'Saturation index — calcite (log Ω)',
+  SI_aragonite: 'Saturation index — aragonite (log Ω)',
+  SI_dolomite:  'Saturation index — dolomite (log Ω)',
+  SI_HMC:       'Saturation index — high-Mg calcite (log Ω, x=0.10 default)',
+  SI_siderite:  'Saturation index — siderite (log Ω)',
+  pCO2:         'Equilibrium pCO₂ (bar)',
+  f_ord:        'Dolomite ordering fraction (Kim 2023; 0=disordered, 1=ordered)',
+  // === END HELIX-OVERLAY-FORK ADDITION ==============================
 };
 
 const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
@@ -230,6 +248,141 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
     read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).salinity });
   params.push({ id: 'O2',       label: 'O2',          fullName: _HELIX_FULL_NAMES.O2,       min: 0,    max: 10,   color: 0xaaccff,
     read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).O2 });
+
+  // === HELIX-OVERLAY-FORK ADDITION (Week 3 carbonate) ===============
+  // PROPOSAL-CARBONATE-GEOCHEM Phase 1 Week 3 — Carbonate System chips.
+  //
+  // 11 observer-only readings that consume the Bjerrum partition (20b),
+  // Ksp(T) (20c), and SI engine (32b) shipped in Weeks 1-2. No engine
+  // promotion required — these chips just visualize what's already
+  // computable from the per-ring fluid + temperature snap. CARBONATE_
+  // KSP_ACTIVE stays false; the SI math runs as a pure observable
+  // (carbonateSaturationIndex/carbonateOmega) regardless of flag state.
+  //
+  // SI ranges: [-3, +3] log Ω covers ~99% of natural-water conditions.
+  // SI=0 is equilibrium; trail at 0.5R = equilibrium, above = super-
+  // saturated, below = undersaturated.
+  //
+  // HMC SI uses a default mg_content=0.10 (typical biogenic HMC per
+  // Bischoff 1987). Phase 1c will move mg_content to per-crystal
+  // state; this chip will refine to use the dominant HMC crystal's
+  // value at that point.
+  //
+  // f_ord = 1 - exp(-N/7) where N = _dol_cycle_count (single value
+  // per simulator per Kim 2023 cycle-counting in 25-chemistry-
+  // conditions.ts:88). Same value at every ring's height — the chip
+  // shows the GLOBAL dolomite-ordering trajectory.
+
+  const _HMC_DEFAULT_MG = 0.10;
+  const _F_ORD_N0 = 7;
+
+  const _readSI = (mineralId: string) => (s: any, w: any, i: number, c: number) => {
+    const f = (s.ring_fluids || [])[i];
+    if (!f) return null;
+    const T = (s.ring_temperatures || [])[i];
+    const T_use = (typeof T === 'number') ? T : 25;
+    if (typeof carbonateSaturationIndex !== 'function') return null;
+    const si = carbonateSaturationIndex(mineralId, f, T_use);
+    return isFinite(si) ? si : null;
+  };
+
+  params.push({
+    id: 'DIC', label: 'DIC', fullName: _HELIX_FULL_NAMES.DIC,
+    min: 0, max: 500, color: 0xC9A875,
+    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).CO3,
+  });
+  params.push({
+    id: 'CO2aq', label: 'CO₂', fullName: _HELIX_FULL_NAMES.CO2aq,
+    min: 0, max: 500, color: 0xF5E5A0,
+    read: (s, w, i, c) => {
+      const f = (s.ring_fluids || [])[i];
+      if (!f || typeof f.CO3 !== 'number' || f.CO3 <= 0) return null;
+      const T = (s.ring_temperatures || [])[i];
+      const T_use = (typeof T === 'number') ? T : 25;
+      if (typeof bjerrumFractions !== 'function') return null;
+      const pH = (typeof f.pH === 'number') ? f.pH : 7.0;
+      return f.CO3 * bjerrumFractions(pH, T_use).H2CO3;
+    },
+  });
+  params.push({
+    id: 'HCO3', label: 'HCO₃', fullName: _HELIX_FULL_NAMES.HCO3,
+    min: 0, max: 500, color: 0x6B96D9,
+    read: (s, w, i, c) => {
+      const f = (s.ring_fluids || [])[i];
+      if (!f || typeof f.CO3 !== 'number' || f.CO3 <= 0) return null;
+      const T = (s.ring_temperatures || [])[i];
+      const T_use = (typeof T === 'number') ? T : 25;
+      if (typeof bjerrumFractions !== 'function') return null;
+      const pH = (typeof f.pH === 'number') ? f.pH : 7.0;
+      return f.CO3 * bjerrumFractions(pH, T_use).HCO3;
+    },
+  });
+  params.push({
+    id: 'CO3_2', label: 'CO₃²⁻', fullName: _HELIX_FULL_NAMES.CO3_2,
+    min: 0, max: 50, color: 0x4A7FE0,
+    read: (s, w, i, c) => {
+      const f = (s.ring_fluids || [])[i];
+      if (!f) return null;
+      const T = (s.ring_temperatures || [])[i];
+      const T_use = (typeof T === 'number') ? T : 25;
+      if (typeof carbonateIonPpm !== 'function') return null;
+      return carbonateIonPpm(f, T_use);
+    },
+  });
+  params.push({
+    id: 'SI_calcite', label: 'SI cal', fullName: _HELIX_FULL_NAMES.SI_calcite,
+    min: -3, max: 3, color: 0xF0F0FF,
+    read: _readSI('calcite'),
+  });
+  params.push({
+    id: 'SI_aragonite', label: 'SI arg', fullName: _HELIX_FULL_NAMES.SI_aragonite,
+    min: -3, max: 3, color: 0xCCCCCC,
+    read: _readSI('aragonite'),
+  });
+  params.push({
+    id: 'SI_dolomite', label: 'SI dol', fullName: _HELIX_FULL_NAMES.SI_dolomite,
+    min: -3, max: 3, color: 0xB87C40,
+    read: _readSI('dolomite'),
+  });
+  params.push({
+    id: 'SI_HMC', label: 'SI HMC', fullName: _HELIX_FULL_NAMES.SI_HMC,
+    min: -3, max: 3, color: 0x9078A0,
+    read: (s, w, i, c) => {
+      const f = (s.ring_fluids || [])[i];
+      if (!f) return null;
+      const T = (s.ring_temperatures || [])[i];
+      const T_use = (typeof T === 'number') ? T : 25;
+      if (typeof carbonateSaturationIndex !== 'function') return null;
+      const si = carbonateSaturationIndex('HMC', f, T_use, _HMC_DEFAULT_MG);
+      return isFinite(si) ? si : null;
+    },
+  });
+  params.push({
+    id: 'SI_siderite', label: 'SI sid', fullName: _HELIX_FULL_NAMES.SI_siderite,
+    min: -3, max: 3, color: 0xB85C2B,
+    read: _readSI('siderite'),
+  });
+  params.push({
+    id: 'pCO2', label: 'pCO₂', fullName: _HELIX_FULL_NAMES.pCO2,
+    min: 0, max: 1, color: 0x4DBC5C,
+    read: (s, w, i, c) => {
+      const f = (s.ring_fluids || [])[i];
+      if (!f) return null;
+      const T = (s.ring_temperatures || [])[i];
+      const T_use = (typeof T === 'number') ? T : 25;
+      if (typeof equilibriumPCO2 !== 'function') return null;
+      return equilibriumPCO2(f, T_use);
+    },
+  });
+  params.push({
+    id: 'f_ord', label: 'f_ord', fullName: _HELIX_FULL_NAMES.f_ord,
+    min: 0, max: 1, color: 0xA060D0,
+    read: (s, w, i, c) => {
+      const n = (typeof s._dol_cycle_count === 'number') ? s._dol_cycle_count : 0;
+      return 1 - Math.exp(-n / _F_ORD_N0);
+    },
+  });
+  // === END HELIX-OVERLAY-FORK ADDITION ==============================
 
   // Ions — id, min, max. Ranges chosen from observed typical values
   // in MVT-seed-42 sample fluid (see the helix-record data dump).
@@ -306,6 +459,11 @@ function _helixSimAtSnap(sim: any, snap: any): any {
   return {
     ring_fluids: snap.ring_fluids || sim.ring_fluids,
     ring_temperatures: snap.ring_temperatures || sim.ring_temperatures,
+    // Week 3 — expose _dol_cycle_count so the f_ord chip can read
+    // it from the snap (not the live conditions). Replay-correct.
+    _dol_cycle_count: (snap._dol_cycle_count != null)
+      ? snap._dol_cycle_count
+      : (sim && sim.conditions ? sim.conditions._dol_cycle_count : 0),
   };
 }
 
@@ -357,11 +515,13 @@ function _helixBuildLegend() {
     _helixParamEnabled = _HELIX_CHEM_PARAMS.map(() => true);
   }
   // Section boundaries inside _HELIX_CHEM_PARAMS (matches the IIFE
-  // build order: 1 primary, 5 specials, then 41 ions).
+  // build order: 1 primary, 5 specials, 11 carbonate-system (Week 3),
+  // then 41 ions = 58 total).
   const sections: Array<{ title: string, start: number, end: number }> = [
-    { title: 'Wall',      start: 0, end: 1 },
-    { title: 'Conditions', start: 1, end: 6 },
-    { title: 'Ions',       start: 6, end: _HELIX_CHEM_PARAMS.length },
+    { title: 'Wall',            start: 0,  end: 1 },
+    { title: 'Conditions',      start: 1,  end: 6 },
+    { title: 'Carbonate System', start: 6,  end: 17 },
+    { title: 'Ions',            start: 17, end: _HELIX_CHEM_PARAMS.length },
   ];
 
   // v22: banner layout. Header at top (title + bulk + focus pills in
