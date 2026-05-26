@@ -98,6 +98,20 @@ js/20c-chemistry-carbonate-Ksp.ts       NEW. Ksp(T) lookups from
                                         to van't Hoff/Maier-Kelley
                                         extrapolation for T-dependence.
 
+js/20d-localization-resolvers.ts        NEW (Week 4). Polymorphic
+                                        accessors for scenario fixtures
+                                        that the localization-future
+                                        will extend. Reads scalar |
+                                        per-ring-array | per-cell-fn
+                                        forms; returns per-cell answer.
+                                        Covers open_to_atmosphere,
+                                        atmospheric_pCO2_bar,
+                                        wall_rock_thermal_buffer_C.
+                                        Phase 1 consumers always go
+                                        through here so per-ring +
+                                        per-cell schemas land
+                                        migration-free.
+
 js/32b-supersat-carbonate-Ksp.ts        NEW. SI(mineral, fluid, T)
                                         functions. Replaces empirical eq
                                         forms in 32-supersat-carbonate.ts.
@@ -261,17 +275,46 @@ data/minerals.json                      EXTEND. Add HMC as a mineral.
 
 ### Open-vs-closed CO₂ exchange
 
-When `conditions.open_to_atmosphere = true`, each step's first action is a pH-pCO₂ equilibration:
+When the resolver says a given (ring, cell) is open at the current step, that step's first action is a pH-pCO₂ equilibration:
 
 ```
 solve for pH such that:
-    pCO2_equilibrium(fluid, T) = atmospheric_pCO2
+    pCO2_equilibrium(fluid, T) = local_atmospheric_pCO2
 where pCO2_equilibrium uses the existing equilibriumPCO2 function
 ```
 
 This is a 1D root-finding problem with monotone behavior — bisection converges in <10 iterations. The pH that emerges replaces `fluid.pH` for that ring at that step. Calcite/aragonite/dolomite SI then computes against the equilibrated chemistry.
 
 **Why this matters:** closed-system calcite precipitation drops fluid pH (because precipitating CaCO₃ removes CO₃²⁻, shifts Bjerrum toward H₂CO₃, releases H⁺ effectively). In nature this is buffered by atmospheric CO₂ if the cavity is open. Currently vugg has no such buffering, so closed-system scenarios over-acidify on calcite precipitation. The sabkha mechanism is specifically open — evaporating brine maintains pCO₂ exchange with the atmosphere throughout.
+
+#### Schema shape — designed for localization-future
+
+Boss directional commitment (2026-05-26): "in the future the data is going to be more localized." Phase 1 writes scalars, but the schema slot accepts a polymorphic type from the start so per-ring (Phase 2) and per-cell (Phase 3+) refinement doesn't require migration:
+
+```json5
+// any of these three forms is valid for open_to_atmosphere:
+"open_to_atmosphere": true                    // scenario-global (Phase 1 typical)
+"open_to_atmosphere": [true, true, false, false, ...]   // per-ring (Phase 2)
+"open_to_atmosphere": "fn:openAtBasinRim"     // per-cell function ref (Phase 3+)
+```
+
+Consumers always go through a resolver:
+
+```ts
+isOpenAtCell(scenario, ringIdx, cellIdx): boolean
+```
+
+which normalizes any of the three forms to a per-cell answer at read time. Phase 1 scenarios write the scalar; the moment a scenario wants per-ring control (e.g. a basin with one open end and one sealed end), the schema accepts the array without consumer changes.
+
+**Same polymorphic shape for the other Phase 1 fixtures that the localization future will reach:**
+
+| field | scalar (Phase 1) | per-ring (Phase 2+) | per-cell (Phase 3+) |
+|---|---|---|---|
+| `open_to_atmosphere` | scenario boolean | ring boolean array | cell resolver function |
+| `atmospheric_pCO2_bar` | scenario number | ring number array | cell resolver |
+| `wall_rock_thermal_buffer_C` | scenario number | ring number array | cell resolver |
+
+Resolvers live in `js/20d-localization-resolvers.ts` (new, Week 4). All three forms always available; scalars are the convenient default for now. Already-per-ring quantities (`ring_temperatures`, `ring_fluids`) stay as-is — they're maximally local at their granularity.
 
 ### Ω-history → cycle count
 
@@ -521,7 +564,7 @@ Carbonate engine + audit framework as parallel tracks.
 
 4. **Vaterite in Phase 1 or Phase 2.** Vaterite as a metastable initial precipitate is geologically real but not load-bearing on any current scenario. Adding it to Phase 1 = ~3 days; deferring = preserved for later.
 
-5. **`open_to_atmosphere` per-ring vs per-scenario.** A cavity could be open at the top (water table proximity) and closed at the bottom (sealed by clay seal). Modeling this requires per-ring open/closed state, not scenario-global. More accurate; more complex to wire. Default per-scenario; per-ring as a future extension.
+5. **`open_to_atmosphere` per-ring vs per-scenario.** ~~Default per-scenario; per-ring as a future extension.~~ RESOLVED 2026-05-26: boss directional commitment — "in the future the data is going to be more localized." Phase 1 ships scalars but schema slot is polymorphic from day 1 (scalar | per-ring array | per-cell function ref), accessed through a resolver in `js/20d-localization-resolvers.ts`. Same shape applies to `atmospheric_pCO2_bar` and `wall_rock_thermal_buffer_C`. See "Schema shape — designed for localization-future" section above. No migration needed when scenarios start using per-ring or per-cell forms — the consumer always reads through the resolver.
 
 6. **Audit framework: separate file vs inline in `data/minerals.json`.** Storing `thermodynamics` inline keeps everything together but bloats `data/minerals.json` from ~6000 lines to ~12000 lines. A sibling `data/thermo.json` keyed by mineral name is cleaner; tools resolve the link at load time. Boss preference?
 
