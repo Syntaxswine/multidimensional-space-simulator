@@ -47,7 +47,7 @@
       "PHREEQC_wateq4f": "USGS PHREEQC wateq4f.dat database. Compiled values; primary sources vary per entry.",
       "PHREEQC_llnl": "USGS PHREEQC llnl.dat database (Lawrence Livermore). Comprehensive but estimation-heavy at low T.",
       "Robie_Hemingway_1995": "Robie & Hemingway (1995) USGS Bull. 2131. Calorimetric standard.",
-      "Bischoff_Bishop_Mackenzie_1987": "Bischoff, Bishop & Mackenzie (1987) Am. Mineral. 72:1316-1326. Biogenic HMC.",
+      "Bischoff_Mackenzie_Bishop_1987": "Bischoff, Mackenzie & Bishop (1987) Geochim. Cosmochim. Acta 51:1413-1423. Stabilities of synthetic magnesian calcites in aqueous solution: comparison with biogenic materials. (v146 prep correction: earlier entry listed authors as Bischoff-Bishop-Mackenzie and journal as Am. Mineral. 72:1316-1326 — both wrong per the published record. The one 1987 paper by these authors covers BOTH synthetic stability AND biogenic comparison, was in GCA, not Am. Min.)",
       "Morse_Mackenzie_1990": "Morse & Mackenzie (1990) Geochemistry of Sedimentary Carbonates, Elsevier. HMC chapter.",
       "Davis_2000": "Davis, Dove & De Yoreo (2000) Science 290:1134-1137. Mg poisoning of calcite step edges.",
       "Schindler_1978": "Schindler et al. (1978). Hydrozincite Ksp.",
@@ -526,10 +526,10 @@
         "notes": "Mg substitution destabilizes the calcite lattice → Ksp increases ~0.1 log unit per mol-% Mg incorporated. At x=0.05 (5% Mg): logKsp ≈ -8.0. At x=0.30 (30% Mg): logKsp ≈ -5.5 (approaching disordered dolomite stability)."
       },
       "valid_T_range_C": [0, 60],
-      "sources": ["Bischoff_Bishop_Mackenzie_1987", "Morse_Mackenzie_1990"],
+      "sources": ["Bischoff_Mackenzie_Bishop_1987", "Morse_Mackenzie_1990"],
       "databases_agree": [],
       "confidence_tier": "B",
-      "notes": "HMC is a continuum, not a discrete phase. Mg content x is per-crystal state (crystal.mg_content). Ksp scales linearly with mol-% Mg over the valid range. Above x=0.30, structure tilts toward dolomite. Bischoff 1987 is the canonical biogenic HMC reference; Morse & Mackenzie 1990 chapter consolidates. NEW MINERAL — to be added to data/minerals.json via vugg-add-mineral in Week 2-3."
+      "notes": "HMC is a continuum, not a discrete phase. Mg content x is per-crystal state (crystal.mg_content). Ksp scales linearly with mol-% Mg over the valid range. Above x=0.30, structure tilts toward dolomite. Bischoff, Mackenzie & Bishop 1987 (GCA 51:1413-1423) is the canonical synthesis-Mg-calcite solubility reference (it also covers biogenic comparison — one paper, two strands). Morse & Mackenzie 1990 'Geochemistry of Sedimentary Carbonates' (Elsevier Developments in Sedimentology 48) consolidates. NEW MINERAL — to be added to data/minerals.json via vugg-add-mineral in Week 11."
     },
     "kinetics": {
       "rate_law": "calcite_pwp_with_mg_inhibition",

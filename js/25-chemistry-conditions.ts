@@ -92,18 +92,35 @@ class VugConditions {
     // alternates between supersaturated-for-ordered-dolomite and
     // undersaturated-for-ordered-dolomite. The relevant threshold is
     // NOT thermodynamic equilibrium (omega = 1 — the boundary for
-    // "any dolomite at all") but the ordered-dolomite stability
-    // boundary (~omega 100 per Burton 1993 / Wright 1999 / Kim 2023).
+    // "any dolomite at all") but the boundary where ordered dolomite
+    // stops winning the competition against the disordered HMC
+    // precursor.
+    //
+    // The omega = 100 threshold is engineering-calibrated from the
+    // codebase's own Ksp data (data/thermo-carbonates.json): ordered
+    // dolomite Ksp = 10^-17.09, disordered HMC at x=0.30 Ksp ≈ 10^-5.5
+    // — so dolomite is ~10^11.6 less soluble than the disordered Mg
+    // intermediate. Setting the cycle threshold at omega_dolomite = 100
+    // approximates "the IAP is enough above ordered-dolomite
+    // equilibrium to overcome the HMC competitor" — the geological
+    // condition Kim 2023 shows is required for ordering progression.
+    //
+    // (Earlier comments in v145 cited Burton 1993 and Wright 1999 as
+    // the basis for the 100 threshold; W11 prep research surfaced that
+    // those citations were fabricated — Burton 1993 Chem. Geol. 105 is
+    // a review paper on aragonite-vs-Mg-calcite cement mineralogy,
+    // NOT a kinetics-vs-omega study. The threshold value is defensible
+    // from the simulator's own Ksp differential, but the citations
+    // were not. "Follow the science" means pulling fabricated anchors
+    // when caught — corrected in the v146 prep arc.)
     //
     // v145 fix: under the SI engine (CARBONATE_KSP_ACTIVE_PER_MINERAL.
     // dolomite = true), supersaturation_dolomite returns raw omega
     // which never drops below 1.0 in sabkha's Mg-rich brine even
     // during evap events — the empirical engine masked this because
     // its ppm-style sigma formula DID cross 1.0 cleanly. The SI
-    // engine's honest omega numbers require an honest geological
-    // threshold for cycle detection. omega = 100 is "ordered
-    // dolomite is favored" vs below = "disordered Mg-calcite is
-    // favored," which is the actual Kim 2023 ordering criterion.
+    // engine's honest omega numbers require an honest threshold for
+    // the Kim ordering criterion.
     //
     // Pre-SI (empirical) mode keeps the 1.0 threshold so v144 and
     // earlier behavior is preserved.

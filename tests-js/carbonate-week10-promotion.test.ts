@@ -103,10 +103,15 @@ describe('PROPOSAL-CARBONATE-GEOCHEM Week 10 — Kim cycle counter on SI omega t
   it('sabkha still counts 12 flood/evap cycles under SI engine', () => {
     // Critical regression: v145 changed the cycle threshold from omega=1
     // (thermodynamic equilibrium for any dolomite phase) to omega=100
-    // (ordered-dolomite stability boundary per Burton 1993 / Wright 1999
-    // / Kim 2023). Sabkha's evap state has omega ~6.5 — well above 1.0
-    // (would never cross under the old threshold) but below 100 (counts
-    // cleanly under the new threshold).
+    // — engineering-calibrated from the sim's own Ksp differential
+    // between ordered dolomite (Ksp ~10^-17) and disordered HMC
+    // precursor (Ksp ~10^-5.5 at x=0.30 per data/thermo-carbonates.json).
+    // omega=100 approximates the boundary where IAP is enough above
+    // dolomite equilibrium to overcome the HMC competitor — the
+    // condition Kim 2023 shows is required for ordering. Sabkha's
+    // evap state has omega ~6.5 (well above 1.0 — would never cross
+    // under the old threshold; below 100 — counts cleanly under the
+    // new threshold).
     const scn = SCENARIOS && SCENARIOS.sabkha_dolomitization;
     if (!scn) return;
     setSeed(42);

@@ -7923,12 +7923,23 @@
 //   threshold.
 //
 //   v145 fix: when CARBONATE_KSP_ACTIVE_PER_MINERAL.dolomite is true,
-//   the threshold is omega = 100 — the ordered-dolomite stability
-//   boundary per Burton 1993 / Wright 1999 / Kim 2023. Below ω=100:
-//   disordered Mg-calcite is favored; above: ordered dolomite is
-//   favored. Cycles across this boundary drive the Kim ordering
-//   mechanism. Sabkha now counts 12/12 again (verified by the W8
-//   diagnostic tool re-run post-fix).
+//   the threshold is omega = 100 — engineering-calibrated from the
+//   codebase's own Ksp data. Ordered dolomite Ksp ≈ 10^-17 vs
+//   disordered HMC at x=0.30 Ksp ≈ 10^-5.5 (per data/thermo-
+//   carbonates.json), so dolomite is ~10^11.6 less soluble than the
+//   HMC precursor. omega_dolomite = 100 approximates "IAP is enough
+//   above ordered-dolomite equilibrium to overcome the HMC
+//   competitor" — the geological condition Kim 2023 shows is needed
+//   for ordering progression. Sabkha now counts 12/12 again
+//   (verified by the W8 diagnostic tool re-run post-fix).
+//
+//   (Earlier drafts of this block cited Burton 1993 / Wright 1999
+//   as the basis for the omega=100 number; W11 prep research
+//   showed Burton 1993 is actually a review paper on aragonite-vs-
+//   Mg-calcite cement mineralogy and the kinetics-vs-omega claim
+//   was fabricated. The threshold VALUE is defensible from the
+//   sim's own Ksp differential; the citations were not. Follow-up
+//   correction in v146-prep.)
 //
 //   The empirical-mode threshold stays at 1.0 to preserve v144 and
 //   earlier behavior.
