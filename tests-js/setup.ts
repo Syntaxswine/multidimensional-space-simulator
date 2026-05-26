@@ -373,6 +373,15 @@ const EXPORTS = [
   'setCarbonateKspActiveFor',
   'snapshotCarbonateKspFlags',
   'restoreCarbonateKspFlags',
+  // Week 4 — wall-mesh localization resolvers + per-vertex accessors
+  // + Henry's-Law pH equilibration (20d-localization-resolvers.ts).
+  'fluidAtMeshVertex',
+  'temperatureAtMeshVertex',
+  'isOpenAtMeshVertex',
+  'atmosphericPCO2AtMeshVertex',
+  'wallRockThermalBufferAtMeshVertex',
+  'hostRockCompositionAtMeshVertex',
+  'equilibratePHtoPCO2',
   // Phase 4b sulfide-class helpers (20c-chemistry-redox.ts).
   'sulfideRedoxAnoxic',
   'sulfideRedoxLinearFactor',
