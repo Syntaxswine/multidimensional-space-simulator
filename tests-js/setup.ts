@@ -366,6 +366,13 @@ const EXPORTS = [
   'carbonateEngineSigma',
   'carbonatesWithSI',
   'carbonatePromotionReady',
+  // Flag setters — closure-scoped `let` requires explicit setters per
+  // the graduated-competition precedent (globalThis writes don't reach
+  // bundle-internal let bindings).
+  'setCarbonateKspActive',
+  'setCarbonateKspActiveFor',
+  'snapshotCarbonateKspFlags',
+  'restoreCarbonateKspFlags',
   // Phase 4b sulfide-class helpers (20c-chemistry-redox.ts).
   'sulfideRedoxAnoxic',
   'sulfideRedoxLinearFactor',

@@ -112,7 +112,12 @@
 // All supersaturation_<carbonate>() methods continue on the empirical
 // path. This is the default; per-mineral promotion (Weeks 9-12) flips
 // this to true AND flips the per-mineral entry.
-const CARBONATE_KSP_ACTIVE = false;
+//
+// `let` rather than const so setCarbonateKspActive() can flip it from
+// outside the bundle (tests, future debug UI). Production promotions
+// edit the literal here in source; tests use the setter for transient
+// flipping with afterEach restore.
+let CARBONATE_KSP_ACTIVE = false;
 
 // Per-mineral fine-grain gate. When CARBONATE_KSP_ACTIVE is true,
 // only entries here flagged true use the SI engine. Per-mineral
@@ -141,6 +146,43 @@ const CARBONATE_KSP_ACTIVE_PER_MINERAL: Record<string, boolean> = {
 function kspSupersatActiveFor(mineralId: string): boolean {
   if (!CARBONATE_KSP_ACTIVE) return false;
   return CARBONATE_KSP_ACTIVE_PER_MINERAL[mineralId] === true;
+}
+
+// Setters — exposed so tests can flip flags transiently. NOT for
+// production code: per the proposal's Week 9-12 plan, real promotions
+// edit the source literals + bump SIM_VERSION in the same commit, so
+// the flag-flip is captured in git history alongside the
+// MINERAL_GATES re-tuning and scenario re-anchoring it requires.
+//
+// Mirrors the setGraduatedCompetition* pattern from js/44 — the IIFE
+// bundle's closure-scoped `let` can't be reassigned via globalThis,
+// so setters are the only safe way to flip it from outside.
+function setCarbonateKspActive(active: boolean): void {
+  CARBONATE_KSP_ACTIVE = !!active;
+}
+
+function setCarbonateKspActiveFor(mineralId: string, active: boolean): void {
+  CARBONATE_KSP_ACTIVE_PER_MINERAL[mineralId] = !!active;
+}
+
+// Snapshot + restore — convenience for tests that flip multiple flags
+// then need to revert in afterEach without remembering exactly what
+// was changed.
+function snapshotCarbonateKspFlags(): { global: boolean; perMineral: Record<string, boolean> } {
+  return {
+    global: CARBONATE_KSP_ACTIVE,
+    perMineral: Object.assign({}, CARBONATE_KSP_ACTIVE_PER_MINERAL),
+  };
+}
+
+function restoreCarbonateKspFlags(snap: { global: boolean; perMineral: Record<string, boolean> }): void {
+  CARBONATE_KSP_ACTIVE = !!snap.global;
+  for (const k in CARBONATE_KSP_ACTIVE_PER_MINERAL) {
+    delete CARBONATE_KSP_ACTIVE_PER_MINERAL[k];
+  }
+  for (const k in snap.perMineral) {
+    CARBONATE_KSP_ACTIVE_PER_MINERAL[k] = !!snap.perMineral[k];
+  }
 }
 
 // =============================================================

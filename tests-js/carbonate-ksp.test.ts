@@ -21,7 +21,7 @@
 // These tests are pure-math + small-scenario. They do NOT regen
 // baselines; that's caught by the calibration test elsewhere.
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 declare const FluidChemistry: any;
 declare const VugConditions: any;
@@ -39,6 +39,11 @@ declare const carbonatePromotionReady: (mineralId: string) => boolean;
 declare const kspSupersatActiveFor: (mineralId: string) => boolean;
 declare const CARBONATE_KSP_ACTIVE: boolean;
 declare const CARBONATE_KSP_ACTIVE_PER_MINERAL: Record<string, boolean>;
+
+declare const setCarbonateKspActive: (active: boolean) => void;
+declare const setCarbonateKspActiveFor: (mineralId: string, active: boolean) => void;
+declare const snapshotCarbonateKspFlags: () => { global: boolean; perMineral: Record<string, boolean> };
+declare const restoreCarbonateKspFlags: (snap: { global: boolean; perMineral: Record<string, boolean> }) => void;
 
 declare const getCarbonateLogKsp: (mineralId: string, T_C: number, mg_content?: number) => number;
 declare const bjerrumFractions: (pH: number, T_C: number) => { H2CO3: number; HCO3: number; CO3: number };
@@ -345,5 +350,136 @@ describe('PROPOSAL-CARBONATE-GEOCHEM Week 2 — promotion readiness audit', () =
     expect(ids).toContain('hydrozincite');
     expect(ids).not.toContain('rosasite');
     expect(ids).not.toContain('aurichalcite');
+  });
+});
+
+// =============================================================
+// Positive-control tests — flip a flag, verify the dispatcher path
+// actually routes to the SI engine, then restore.
+//
+// Without these, the Week 9 promotion would be the first time the
+// dispatcher actually runs. Catching a typo or wrong-arg-list there
+// means the bug surfaces inside a calibration-shift commit, mixed
+// in with legitimate seed-42 drift — hard to diagnose. Catching it
+// here keeps the dispatcher contract honest from Week 2 onward.
+// =============================================================
+
+describe('PROPOSAL-CARBONATE-GEOCHEM Week 2 — dispatcher positive control', () => {
+  // afterEach restore so every test starts with the canonical
+  // flag state (global off, all per-mineral off) regardless of
+  // what prior tests did.
+  let _flagSnap: any = null;
+
+  afterEach(() => {
+    if (_flagSnap) {
+      restoreCarbonateKspFlags(_flagSnap);
+      _flagSnap = null;
+    }
+  });
+
+  it('flag setter actually flips the global flag', () => {
+    _flagSnap = snapshotCarbonateKspFlags();
+    expect(kspSupersatActiveFor('calcite')).toBe(false);
+    setCarbonateKspActive(true);
+    setCarbonateKspActiveFor('calcite', true);
+    expect(kspSupersatActiveFor('calcite')).toBe(true);
+  });
+
+  it('with calcite flag on, supersaturation_calcite() returns carbonateEngineSigma value', () => {
+    _flagSnap = snapshotCarbonateKspFlags();
+    setCarbonateKspActive(true);
+    setCarbonateKspActiveFor('calcite', true);
+    const f = new FluidChemistry({ Ca: 200, CO3: 150, pH: 8.0 });
+    const cond = new VugConditions({ temperature: 25, fluid: f });
+    const engineSigma = cond.supersaturation_calcite();
+    const expected = carbonateEngineSigma('calcite', f, 25);
+    expect(Number.isFinite(engineSigma)).toBe(true);
+    expect(Number.isFinite(expected)).toBe(true);
+    expect(engineSigma).toBeCloseTo(expected, 6);
+    // And it should differ from the empirical path (otherwise the
+    // dispatcher might be silently falling through):
+    setCarbonateKspActiveFor('calcite', false);
+    const empirical = cond.supersaturation_calcite();
+    expect(Math.abs(engineSigma - empirical)).toBeGreaterThan(0.01);
+  });
+
+  it('hard gate still fires when calcite flag is on (T > T_max → 0)', () => {
+    // The bug we're guarding against: dispatcher placed BEFORE the
+    // thermal-decomposition gate would let calcite "precipitate" at
+    // 600°C just because Ksp(T) is still finite there.
+    _flagSnap = snapshotCarbonateKspFlags();
+    setCarbonateKspActive(true);
+    setCarbonateKspActiveFor('calcite', true);
+    const f = new FluidChemistry({ Ca: 500, CO3: 500, pH: 8.0 });
+    const cond = new VugConditions({ temperature: 600, fluid: f });
+    const sigma = cond.supersaturation_calcite();
+    expect(sigma).toBe(0);
+  });
+
+  it('hard redox gate still fires when siderite flag is on (oxidizing → 0)', () => {
+    // Siderite needs anoxic per Fe²⁺ stability. The SI engine doesn't
+    // know about redox (Phase 4 split not landed), so without the
+    // redox gate firing first, an oxidizing fluid would still produce
+    // omega > 0 from the SI calculation. Geologically wrong.
+    _flagSnap = snapshotCarbonateKspFlags();
+    setCarbonateKspActive(true);
+    setCarbonateKspActiveFor('siderite', true);
+    const f = new FluidChemistry({ Fe: 100, CO3: 200, pH: 7, O2: 5 }); // oxidizing
+    const cond = new VugConditions({ temperature: 60, fluid: f });
+    const sigma = cond.supersaturation_siderite();
+    expect(sigma).toBe(0);
+  });
+
+  it('hard mg_ratio gate still fires when dolomite flag is on (Mg/Ca too low → 0)', () => {
+    // Dolomite needs mg_ratio in [0.3, 30]. Engine gate skips dolomite
+    // entirely outside that band. SI engine without the gate would
+    // happily compute omega for any Ca + Mg + CO3 combination.
+    _flagSnap = snapshotCarbonateKspFlags();
+    setCarbonateKspActive(true);
+    setCarbonateKspActiveFor('dolomite', true);
+    const f = new FluidChemistry({ Ca: 1000, Mg: 50, CO3: 200, pH: 7.5 }); // mg_ratio = 0.05
+    const cond = new VugConditions({ temperature: 25, fluid: f });
+    const sigma = cond.supersaturation_dolomite();
+    expect(sigma).toBe(0);
+  });
+
+  it('per-mineral flag isolates — flipping calcite does NOT affect dolomite', () => {
+    _flagSnap = snapshotCarbonateKspFlags();
+    setCarbonateKspActive(true);
+    setCarbonateKspActiveFor('calcite', true);
+    // dolomite per-mineral is still false → dolomite uses empirical
+    const f = new FluidChemistry({ Ca: 200, Mg: 200, CO3: 150, pH: 7.5 });
+    const cond = new VugConditions({ temperature: 25, fluid: f });
+    const dol_si_off = cond.supersaturation_dolomite();
+    // Now flip dolomite specifically
+    setCarbonateKspActiveFor('dolomite', true);
+    const dol_si_on = cond.supersaturation_dolomite();
+    // These should differ — flipping the per-mineral flag changes path
+    expect(Math.abs(dol_si_off - dol_si_on)).toBeGreaterThan(0.01);
+  });
+
+  it('global flag OFF + per-mineral ON still uses empirical (AND-gate semantics)', () => {
+    _flagSnap = snapshotCarbonateKspFlags();
+    setCarbonateKspActive(false);  // global OFF
+    setCarbonateKspActiveFor('calcite', true);  // per-mineral ON
+    expect(kspSupersatActiveFor('calcite')).toBe(false);  // AND-gate
+    const f = new FluidChemistry({ Ca: 200, CO3: 150, pH: 8.0 });
+    const cond = new VugConditions({ temperature: 25, fluid: f });
+    setCarbonateKspActive(true);
+    const sigma_both_on = cond.supersaturation_calcite();
+    setCarbonateKspActive(false);
+    const sigma_global_off = cond.supersaturation_calcite();
+    expect(Math.abs(sigma_both_on - sigma_global_off)).toBeGreaterThan(0.01);
+  });
+
+  it('snapshot + restore round-trips correctly', () => {
+    const original = snapshotCarbonateKspFlags();
+    setCarbonateKspActive(true);
+    setCarbonateKspActiveFor('calcite', true);
+    setCarbonateKspActiveFor('siderite', true);
+    restoreCarbonateKspFlags(original);
+    expect(CARBONATE_KSP_ACTIVE).toBe(false);
+    expect(CARBONATE_KSP_ACTIVE_PER_MINERAL.calcite).toBe(false);
+    expect(CARBONATE_KSP_ACTIVE_PER_MINERAL.siderite).toBe(false);
   });
 });
