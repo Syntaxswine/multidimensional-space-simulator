@@ -160,6 +160,11 @@ const MINERAL_GATES_hydrozincite: MineralGates = {
 
 Object.assign(VugConditions.prototype, {
   supersaturation_calcite() {
+  // Week 2 (PROPOSAL-CARBONATE-GEOCHEM): SI-based dispatcher hook.
+  // No-op when CARBONATE_KSP_ACTIVE is false (default); when on, the
+  // empirical body below is bypassed entirely. See js/32b-supersat-
+  // carbonate-Ksp.ts for the SI engine + flag mechanism.
+  if (kspSupersatActiveFor('calcite')) return carbonateEngineSigma('calcite', this.fluid, this.temperature);
   // Calcite has RETROGRADE solubility — less soluble at higher T.
   // Precipitates on heating or CO₂ degassing. Forms at 10-500°C.
   // Decomposes to CaO + CO₂ above ~500°C.
@@ -205,6 +210,7 @@ Object.assign(VugConditions.prototype, {
 },
 
   supersaturation_siderite() {
+  if (kspSupersatActiveFor('siderite')) return carbonateEngineSigma('siderite', this.fluid, this.temperature);
   // FeCO3 — iron carbonate. Reducing conditions only (Fe²⁺ stability).
   const g = MINERAL_GATES_siderite;
   if (this.fluid.Fe < g.fluid_min!.Fe || effectiveCO3(this.fluid, this.temperature) < g.fluid_min!.CO3) return 0;
@@ -224,6 +230,7 @@ Object.assign(VugConditions.prototype, {
 },
 
   supersaturation_dolomite() {
+  if (kspSupersatActiveFor('dolomite')) return carbonateEngineSigma('dolomite', this.fluid, this.temperature);
   // CaMg(CO3)2 — ordered Ca-Mg carbonate. Kim 2023: T floor lowered to
   // 10°C — ambient T is fine thermodynamically, kinetics handled by f_ord.
   const g = MINERAL_GATES_dolomite;
@@ -253,6 +260,7 @@ Object.assign(VugConditions.prototype, {
 },
 
   supersaturation_rhodochrosite() {
+  if (kspSupersatActiveFor('rhodochrosite')) return carbonateEngineSigma('rhodochrosite', this.fluid, this.temperature);
   // MnCO3 — pink Mn carbonate, structurally identical to calcite (R3̄c).
   // T 20-250°C, pH 5-9, Mn²⁺ stable in moderate-to-reducing conditions.
   const g = MINERAL_GATES_rhodochrosite;
@@ -273,6 +281,7 @@ Object.assign(VugConditions.prototype, {
 },
 
   supersaturation_aragonite() {
+  if (kspSupersatActiveFor('aragonite')) return carbonateEngineSigma('aragonite', this.fluid, this.temperature);
   // Orthorhombic CaCO₃ dimorph — metastable at surface but kinetically
   // favored when Mg/Ca > ~1.5 (dominant, Folk 1974 / Morse 1997),
   // T > ~50°C (Burton & Walter 1987 in low-Mg), or Ω > ~10 (Ostwald
@@ -304,6 +313,7 @@ Object.assign(VugConditions.prototype, {
 },
 
   supersaturation_malachite() {
+  if (kspSupersatActiveFor('malachite')) return carbonateEngineSigma('malachite', this.fluid, this.temperature);
   const g = MINERAL_GATES_malachite;
   if (this.fluid.Cu < g.fluid_min!.Cu || effectiveCO3(this.fluid, this.temperature) < g.fluid_min!.CO3 || !carbonateRedoxAvailable(this.fluid, g.O2_min!)) return 0;
   // Denominators reference realistic supergene weathering fluid (Cu ~25 ppm,
@@ -328,6 +338,7 @@ Object.assign(VugConditions.prototype, {
 },
 
   supersaturation_smithsonite() {
+  if (kspSupersatActiveFor('smithsonite')) return carbonateEngineSigma('smithsonite', this.fluid, this.temperature);
   // v17 reconciliation (May 2026): supergene-only per
   // research-smithsonite.md (T 10-50°C optimum, never above ~80°C
   // in nature). Pre-v17 JS hard cap at 200°C was too lenient.
@@ -346,6 +357,7 @@ Object.assign(VugConditions.prototype, {
 },
 
   supersaturation_azurite() {
+  if (kspSupersatActiveFor('azurite')) return carbonateEngineSigma('azurite', this.fluid, this.temperature);
   const g = MINERAL_GATES_azurite;
   if (this.fluid.Cu < g.fluid_min!.Cu || effectiveCO3(this.fluid, this.temperature) < g.fluid_min!.CO3 || !carbonateRedoxAvailable(this.fluid, g.O2_min!)) return 0;
   const cu_f = Math.min(this.fluid.Cu / 40.0, 2.0);
@@ -359,6 +371,7 @@ Object.assign(VugConditions.prototype, {
 },
 
   supersaturation_cerussite() {
+  if (kspSupersatActiveFor('cerussite')) return carbonateEngineSigma('cerussite', this.fluid, this.temperature);
   const g = MINERAL_GATES_cerussite;
   if (this.fluid.Pb < g.fluid_min!.Pb || effectiveCO3(this.fluid, this.temperature) < g.fluid_min!.CO3) return 0;
   const pb_f = Math.min(this.fluid.Pb / 40.0, 2.0);
@@ -428,6 +441,7 @@ Object.assign(VugConditions.prototype, {
   // pseudohexagonal cyclic twinning is the diagnostic habit. Loses to
   // celestine when SO4 dominates.
   supersaturation_strontianite() {
+    if (kspSupersatActiveFor('strontianite')) return carbonateEngineSigma('strontianite', this.fluid, this.temperature);
     const g = MINERAL_GATES_strontianite;
     if (this.fluid.Sr < g.fluid_min!.Sr || this.fluid.CO3 < g.fluid_min!.CO3) return 0;
     let sigma = (this.fluid.Sr / 80.0) * (this.fluid.CO3 / 200.0);
@@ -449,6 +463,7 @@ Object.assign(VugConditions.prototype, {
   // (Illinois) is the canonical witherite + barite + fluorite + galena
   // assemblage.
   supersaturation_witherite() {
+    if (kspSupersatActiveFor('witherite')) return carbonateEngineSigma('witherite', this.fluid, this.temperature);
     const g = MINERAL_GATES_witherite;
     if (this.fluid.Ba < g.fluid_min!.Ba || this.fluid.CO3 < g.fluid_min!.CO3) return 0;
     let sigma = (this.fluid.Ba / 80.0) * (this.fluid.CO3 / 200.0);
@@ -473,6 +488,7 @@ Object.assign(VugConditions.prototype, {
   // 2014). Per Hitzman et al. 2003 Econ. Geol. 98:685-714 (nonsulfide
   // Zn synthesis) + Boni & Mondillo 2015 Ore Geol. Rev. 67:208-233.
   supersaturation_hydrozincite() {
+    if (kspSupersatActiveFor('hydrozincite')) return carbonateEngineSigma('hydrozincite', this.fluid, this.temperature);
     const g = MINERAL_GATES_hydrozincite;
     if (this.fluid.Zn < g.fluid_min!.Zn || this.fluid.CO3 < g.fluid_min!.CO3) return 0;
     if (this.fluid.O2 < g.O2_min!) return 0;
