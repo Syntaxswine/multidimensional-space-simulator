@@ -169,7 +169,127 @@ These are NOT engine work. They're the bigger-than-engine horizon the boss surfa
 
    Sequencing implication: the design direction may grow from "per-vertex chips (smallest deliverable)" into "per-vertex fluid state + chips" as a single coherent unit. Worth a proposal doc before building.
 
-2. **Strip view (boss's brother's request).** Vertical filmstrip — one rectangular multi-line graph per time step. x=ring index 1-16, y=chip value, one line per chip. Virtual scrolling. Geologically a paragenesis viewer — each strip is a moment-in-time chemistry snapshot.
+2. **Strip view (Shy's request — boss's brother).** Vertical filmstrip — one rectangular multi-line graph per time step.
+
+   **DESIGN CONVERSATION 2026-05-26 (corrections + clarifications to original handoff framing):**
+
+   - **x axis = position along vug HEIGHT**, not ring index. Resolution should be **adaptive** — more cells when zoomed in. The strip rectangle should be **near screen-width** (NOT thumbnail-sized) — that's load-bearing for resolution.
+
+   - **All 30+ chips overlaid on the same strip**, with **line bundling**: when two chips would share a pixel, they merge into a single shared (wider) line rather than one obscuring the other. Like a Sankey/alluvial pattern — quiet chips collapse into a baseline ribbon; chips doing geological work this step diverge out and stand out.
+
+   - **y axis = per-chip normalized value** (0–1, each chip mapped to its own range). The chart shows SHAPES against each chip's own range, not absolute values. This is the multidimensional-space-visualization framing — the point is to read the shape of variation, not compare absolute magnitudes across chips.
+
+   - **Time direction:** older at the bottom, newer at the top (stratigraphic convention — read like a column section). Strip grows upward as sim runs.
+
+   - **Each time row expands into 24 angular sub-strips.** The strip at one time unit shows the chemistry along ONE vertical slice through the vug at ONE rotation angle. To represent the full 3D state, each time unit needs 24 angular sub-strips (15° steps — natural goniometer-indexing convention). Default view shows the **mean across 24 sub-strips** as one collapsed line; arrow on the LEFT side expands the time unit into 24 stacked sub-strips. Vertical-stacking on expand (each sub-strip preserves screen-width-resolution X axis); the time unit takes 24× the vertical space when expanded.
+
+   - **Variance indicator dot** above the collapse/expand arrow, colored by **max-per-chip-normalized-spread across all chips and all height positions** in that time unit. Green < 0.1, yellow 0.1–0.5, red > 0.5. Lets the eye scan the strip and pick which time units to expand without reading the chemistry yourself.
+
+   - **Variable selector** in a sticky **top** position — chip filter UI grouped by chemistry system (mirror the helicoid panel sections: CARBONATE SYSTEM, sulfate, redox, etc.). Per-system + per-chip toggles. Presets ("CaCO3 only", "supergene chemistry") helpful.
+
+   - **Fixed-position "jump to top" and "jump to bottom" buttons** — pinned regardless of scroll position. Essential when the strip is thousands of steps tall.
+
+   **DEPENDENCY: per-vertex spatial chemistry must ship first.**
+
+   Strip view shows variation along height (within a sub-strip) AND across angles (across the 24 sub-strips). For either dimension to have meaningful content, the underlying chemistry data must actually differ vertex-to-vertex. Right now `fluidAtMeshVertex` likely returns the uniform global fluid for every vertex, which means every strip would be a vertical bar of identical chips and every expansion would show 24 identical sub-strips. Strip view chrome shipped against uniform chemistry would look right but say nothing.
+
+   The per-vertex data model expansion (see direction 1 above) is therefore a prerequisite for strip view. Both height AND angular variation need to be supported:
+   - Height: fluid stratification, thermal gradients, evaporation gradients — covered in the per-vertex note above
+   - Angular: drip-source-side vs opposite-side, wall-rock heterogeneity around the cavity perimeter, convection cell patterns
+
+   The helicoid + `fluidAtMeshVertex` API already supports per-vertex reads — the angular dimension is naturally there (vertices around a ring have different angular positions). What's missing is the upstream physics that actually differentiates fluid composition at different vertices.
+
+   **THE HELICOID-AS-RECORDER ARCHITECTURAL REFRAME (Shy's framing, 2026-05-26):**
+
+   This is the deeper architectural insight from the design conversation. The helicoid is currently a visualization — it samples chips and renders them, then discards the samples. Shy's request reframes the helicoid as a **recording device** for multidimensional space. The samples ARE the artifact; the live chip display is just one downstream consumer.
+
+   Consumers of the recording:
+   - **Helicoid chip display** — live visualization (consumer #1, already exists)
+   - **Strip view** — post-hoc filmstrip paragenesis viewer (consumer #2, designed below)
+   - **Record / filter / branch mode** — future (consumer #3, design 3 above)
+
+   The dataset format described next is the central artifact. The helicoid becomes the instrument that writes it.
+
+   **LOCKED DECISIONS (post-conversation 2026-05-26):**
+
+   - **Post-hoc only** — strip view loads a completed vugg dataset. No live tail-following. (Different from a live debug panel — this is closer to an analysis tab.)
+   - **Mineral nucleation markers ship in v1** as a separate overlay layer on top of the chip lines. Discrete dots at (height-position, time-row) colored by mineral, with mineral abbreviation on hover or always-shown. Collapsed view shows the OR across 24 angles (marker appears if ANY angle fired); expanded view shows each in its specific angular sub-strip.
+   - **Variable selector mirrors helicoid chip grouping** — per-system + per-chip toggles. Sane "show all" / "show none" / system presets. Sort options may expand later.
+   - **Render path:** SVG vector lines per chip. The width-of-the-strip can be a small set of preset ratios (1200 / 1600 / 1920 px wide, picked at session start) so most math can be pre-tabulated; doesn't need full continuous responsive layout.
+   - **Show every step, no aggregation** in v1.
+   - **Cross-sub-strip cursor** when expanded — confirmed yes. Hovering at height-X on one sub-strip lights a thin vertical cursor on all 24 simultaneously.
+   - **Strip view is its OWN tab,** distinct from record mode. They may share the underlying dataset format (post-completion vugg-state-as-data), but they're separate UIs with separate concerns.
+   - **Angular labeling:** 1–24 in the data; `"<n> / <deg>°"` (e.g. `"3 / 30°"`) in the UI. Sub-strip 1 = 0° (helicoid's natural reference angle).
+   - **Persistence:** auto-capture, always-on. Every completed vugg writes a dataset; strip view tab lists past runs.
+   - **Cross-version compatibility via manifest header.** Reader fails gracefully on missing chips (default off in selector with a "legacy chips" disclosure); manifest declares what's present so the reader knows how to decode.
+
+   **DATASET FORMAT (proposal, v1):**
+
+   ```
+   {
+     "format_version": 1,
+     "sim_version": 148,
+     "scenario_id": "sabkha_dolomitization",
+     "seed": 42,
+     "axes": {
+       "steps": 260,
+       "angular_indices": 24,
+       "height_positions": 60
+     },
+     "chips": [
+       { "id": "Ca",  "system": "carbonate", "range": [0, 5000], "units": "ppm" },
+       { "id": "Mg",  "system": "carbonate", "range": [0, 2000], "units": "ppm" },
+       { "id": "pH",  "system": "carbonate", "range": [4, 11],   "units": "" },
+       ...
+     ],
+     "chip_data": <base64 quantized uint8 array [step][angle][height][chip]>,
+     "nucleation_events": [
+       { "step": 5, "angle": 3, "height": 42, "mineral": "calcite" },
+       ...
+     ]
+   }
+   ```
+
+   Compactness choices:
+   - **uint8 quantization** per chip (each chip normalized to its declared range, stored as 0–255). Sub-1% precision loss; 4× smaller than float32.
+   - **Manifest declares chip list** — future-proofing built in. New chips don't appear in old files; old chips that no longer exist appear as "legacy" but still decode.
+   - **Nucleation events as sparse list** rather than parallel dense grid.
+   - **Whole file gzipped** via browser DecompressionStream. Free 2–5× compression on top.
+
+   Estimated size for a 200-step × 24 × 60 × 30 dataset: ~8.6 MB raw uint8, ~1–2 MB gzipped.
+
+   Storage tier: **IndexedDB** (gigabyte-scale, async, browser-native). localStorage is too small.
+
+   Future compression levers if size becomes a problem (none required for v1):
+   - Delta encoding along time axis
+   - RLE for quiet-chip runs
+   - Per-chip activity gating (skip chips that don't change in a window)
+
+   **FAVORITES UI (v1):**
+
+   - **Star button below the expand arrow** on the left of each collapsed time strip → favorites the whole time slice
+   - **Star button to the left of each expanded angular sub-strip** → favorites that specific (time, angle) sub-strip
+   - **Click turns the star yellow** (turning-on indication). No other behavior in v1.
+   - Data model: `favorites: { time_slices: Set<step>, sub_strips: Set<[step, angle]> }` annotation layer **separate from the immutable dataset**, stored alongside it in IndexedDB. Future versions can hook this into filters, export-favorites-only, comparison views — without re-architecting.
+
+   **VARIANCE DOT (above the expand arrow):**
+
+   - Green: max-per-chip-normalized-spread across all chips and all height positions in that time unit < 0.1
+   - Yellow: 0.1 – 0.5
+   - Red: > 0.5
+   - Sits above the expand arrow on the LEFT of the collapsed time strip; the star (favorite) sits BELOW the expand arrow.
+
+   **PREREQUISITES — what ships first:**
+
+   1. **Per-vertex spatial chemistry expansion** (design direction 1 above) with both height AND angular variation. Without it, every strip is a vertical bar of identical chips and every expansion shows 24 identical sub-strips.
+   2. **Helicoid-as-recorder instrumentation** — extend the helicoid sampling layer to persist 24 angular samples × N height positions × M steps per run, plus structured nucleation event log. Writes to IndexedDB.
+   3. **Then** the strip view tab — UI shell, dataset loader, render layer, favorites layer.
+
+   **OPEN ITEMS still on the table:**
+
+   - **Helicoid native sample count check** — verify whether the current helicoid samples 24 angular positions natively or some other number. If it's something else (16 was an older number; the current is unknown without a code check), reconcile to 24 either by upsampling or bumping the helicoid sample density.
+   - **Reference angle for sub-strip 1 = 0°** — need to verify whatever the helicoid uses today is sane (or pick a canonical reference if there isn't one).
+   - **Performance impact of recording during the run** — sampling chip values is cheap (already happening for live display); persisting to IndexedDB at run-end (not per-step) is cheap. Streaming per-step writes might add latency; benchmark before committing to per-step writes.
 
 3. **Filter system + record mode (the biggest).** DF-style work-order conditional UI (NOT movies — DF doesn't have those; the work-order conditional form is the relevant reference). Expression-tree underneath. Subject + operator + threshold + action. Composable AND/OR/NOT. Recording = scenario snap data + filter rules bundled. Branching from recording is the killer feature.
 
