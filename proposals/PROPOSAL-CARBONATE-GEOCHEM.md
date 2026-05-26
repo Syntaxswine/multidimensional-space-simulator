@@ -289,32 +289,48 @@ This is a 1D root-finding problem with monotone behavior — bisection converges
 
 #### Schema shape — designed for localization-future
 
-Boss directional commitment (2026-05-26): "in the future the data is going to be more localized." Phase 1 writes scalars, but the schema slot accepts a polymorphic type from the start so per-ring (Phase 2) and per-cell (Phase 3+) refinement doesn't require migration:
+Boss directional commitment (2026-05-26): "the data is going to be more localized [meaning] instead of just by ring it would break it up into even smaller more localized sections of the vugg wall." Per-ring is the current granularity for `ring_fluids` and `ring_temperatures`; the future direction is **finer than per-ring** — per-cell (one value per `(ringIdx, cellIdx)`), per-vertex on the cavity mesh, or per-region (arbitrary cell groupings such as "basin floor" vs "basin walls" defined by mesh tagging). Phase 1 writes scalars, but the schema slot accepts a polymorphic type from the start so finer-than-per-ring refinement doesn't require migration:
 
 ```json5
-// any of these three forms is valid for open_to_atmosphere:
-"open_to_atmosphere": true                    // scenario-global (Phase 1 typical)
-"open_to_atmosphere": [true, true, false, false, ...]   // per-ring (Phase 2)
-"open_to_atmosphere": "fn:openAtBasinRim"     // per-cell function ref (Phase 3+)
+// any of these forms is valid for open_to_atmosphere:
+"open_to_atmosphere": true                              // scenario-global (Phase 1 typical)
+"open_to_atmosphere": [true, true, false, false, ...]   // per-ring (transitional)
+"open_to_atmosphere": "fn:openAtBasinRim"               // per-cell function ref (Phase 2+ target)
+"open_to_atmosphere": {                                 // per-region tagged
+  "_default": false,
+  "basin_floor": false,
+  "basin_rim":   true,
+  "ceiling":     true
+}
 ```
 
-Consumers always go through a resolver:
+Consumers always go through a resolver that ultimately produces a per-cell answer:
 
 ```ts
-isOpenAtCell(scenario, ringIdx, cellIdx): boolean
+isOpenAtCell(scenario, ringIdx, cellIdx, regionTag?): boolean
 ```
 
-which normalizes any of the three forms to a per-cell answer at read time. Phase 1 scenarios write the scalar; the moment a scenario wants per-ring control (e.g. a basin with one open end and one sealed end), the schema accepts the array without consumer changes.
+Per-cell is the **target granularity** the resolver guarantees, regardless of which form the scenario writes. Phase 1 scenarios write scalars for convenience; the moment a scenario wants per-cell control (e.g. a basin with the rim open and the floor sealed under a brine cap), the schema accepts the function or per-region form without consumer changes. The per-ring array form is transitional — useful when a quantity genuinely varies vertically but not angularly (e.g. a horizontally-layered geothermal gradient) — but is NOT the destination.
 
 **Same polymorphic shape for the other Phase 1 fixtures that the localization future will reach:**
 
-| field | scalar (Phase 1) | per-ring (Phase 2+) | per-cell (Phase 3+) |
+| field | scalar (Phase 1) | per-region / per-cell (target) | notes |
 |---|---|---|---|
-| `open_to_atmosphere` | scenario boolean | ring boolean array | cell resolver function |
-| `atmospheric_pCO2_bar` | scenario number | ring number array | cell resolver |
-| `wall_rock_thermal_buffer_C` | scenario number | ring number array | cell resolver |
+| `open_to_atmosphere` | scenario boolean | per-cell function or region map | basins with open rim + sealed floor |
+| `atmospheric_pCO2_bar` | scenario number | per-cell field | different cells see different headspace |
+| `wall_rock_thermal_buffer_C` | scenario number | per-cell field | wall rock composition varies along the cavity |
+| `host_rock_composition` | scenario tag (e.g. "limestone") | per-cell tag map | mixed host rocks (limestone + chert beds) need this for reactive_wall-style scenarios |
 
-Resolvers live in `js/20d-localization-resolvers.ts` (new, Week 4). All three forms always available; scalars are the convenient default for now. Already-per-ring quantities (`ring_temperatures`, `ring_fluids`) stay as-is — they're maximally local at their granularity.
+Resolvers live in `js/20d-localization-resolvers.ts` (new, Week 4). All forms always available; scalars are the convenient default for now.
+
+**Existing per-ring quantities (`ring_temperatures`, `ring_fluids`) are themselves transitional.** They were the right resolution when the simulator was per-ring, but the localization-future means the carbonate engine should be designed to consume per-cell chemistry when it lands, not just per-ring. Phase 1 reads through a thin per-cell accessor:
+
+```ts
+fluidAtCell(sim, ringIdx, cellIdx) → FluidChemistry
+temperatureAtCell(sim, ringIdx, cellIdx) → number
+```
+
+which currently returns the ring value (no per-cell variation yet) but is the single point where per-cell fluid would be introduced when the data model extends. Engines that consume the fluid go through these accessors so they're agnostic to the data model's current granularity — a per-cell `ring_fluids[i][c]` extension lands by changing the accessor alone, not 84 grow_*() call sites.
 
 ### Ω-history → cycle count
 
@@ -564,7 +580,7 @@ Carbonate engine + audit framework as parallel tracks.
 
 4. **Vaterite in Phase 1 or Phase 2.** Vaterite as a metastable initial precipitate is geologically real but not load-bearing on any current scenario. Adding it to Phase 1 = ~3 days; deferring = preserved for later.
 
-5. **`open_to_atmosphere` per-ring vs per-scenario.** ~~Default per-scenario; per-ring as a future extension.~~ RESOLVED 2026-05-26: boss directional commitment — "in the future the data is going to be more localized." Phase 1 ships scalars but schema slot is polymorphic from day 1 (scalar | per-ring array | per-cell function ref), accessed through a resolver in `js/20d-localization-resolvers.ts`. Same shape applies to `atmospheric_pCO2_bar` and `wall_rock_thermal_buffer_C`. See "Schema shape — designed for localization-future" section above. No migration needed when scenarios start using per-ring or per-cell forms — the consumer always reads through the resolver.
+5. **`open_to_atmosphere` per-ring vs per-scenario.** ~~Default per-scenario; per-ring as a future extension.~~ RESOLVED 2026-05-26: boss directional commitment — "the data is going to be more localized [meaning] instead of just by ring it would break it up into even smaller more localized sections of the vugg wall." Per-ring is already where fluid chemistry lives; the future is **finer than per-ring** (per-cell, per-vertex, or per-region with tagged groupings). Phase 1 ships scalars but schema slot is polymorphic from day 1 (scalar | per-ring array | per-cell function ref | per-region map), accessed through a resolver in `js/20d-localization-resolvers.ts`. Same shape applies to `atmospheric_pCO2_bar`, `wall_rock_thermal_buffer_C`, and `host_rock_composition`. The per-ring array form is transitional (useful for genuinely vertically-stratified quantities) but not the destination. Existing per-ring quantities (`ring_temperatures`, `ring_fluids`) are themselves transitional — the carbonate engine reads through per-cell accessors (`fluidAtCell`, `temperatureAtCell`) so the future per-cell fluid representation lands by changing the accessors alone, not 84 grow_*() call sites. See "Schema shape — designed for localization-future" section above.
 
 6. **Audit framework: separate file vs inline in `data/minerals.json`.** Storing `thermodynamics` inline keeps everything together but bloats `data/minerals.json` from ~6000 lines to ~12000 lines. A sibling `data/thermo.json` keyed by mineral name is cleaner; tools resolve the link at load time. Boss preference?
 
