@@ -12695,7 +12695,111 @@ let timeScale = 5.0;
 //   tests-js/baselines/seed42_v145.json: regenerated baseline
 //   tests-js/carbonate-week10-promotion.test.ts: validation tests
 //   tools/w10_dolomite_calibration_probe.mjs: prep diagnostic
-const SIM_VERSION = 145;
+// ----------------------------------------------------------------
+// v146 (2026-05-26): PROPOSAL-CARBONATE-GEOCHEM Phase 1 Week 11 —
+// HMC mineral add + SI engine promotion. HMC (High-Magnesium Calcite,
+// the disordered Ca(1-x)Mg(x)CO3 intermediate with x ≈ 0.05-0.30) is
+// added as a MINERAL_SPEC entry via the vugg-add-mineral skill, AND
+// flipped onto the SI engine + PWP rate path. Combined commit because
+// the mineral-add and the promotion are the same coherent story:
+// HMC's whole reason-to-exist in the simulator is the Kim 2023
+// disordered-precursor-to-ordered-dolomite mechanism, which lives in
+// the SI engine + PWP layer, not the empirical engine.
+//
+// HMC was BLOCKED before this commit per the carbonate proposal —
+// the supersaturation + rate engine helpers (saturationIndex_HMC in
+// 32b, HMCRate in 52b) had been ready since Week 2 + Week 6, but
+// without a MINERAL_SPEC entry, no grow_HMC, no _nuc_HMC, and no
+// MINERAL_ENGINES wiring, HMC could never actually nucleate or fire.
+// W11 unblocks this stack.
+//
+// PER-CRYSTAL mg_content STATE
+//
+//   The mg_content of any individual HMC crystal is per-crystal state,
+//   set at nucleation from the fluid Mg/Ca per Mucci-Morse 1983
+//   partitioning (linear approximation: mg_content ≈ 0.05 + 0.02 ×
+//   (Mg/Ca - 1), capped at 0.30). It's stored on crystal._mg_content
+//   and threaded through saturationIndex_HMC + HMCRate at growth time.
+//
+//   This is the FIRST per-crystal-composition variable mineral in the
+//   sim. Other minerals are single-composition (calcite = CaCO3 only);
+//   HMC's mg_content is intrinsic to its chemistry and varies per
+//   crystal as a function of nucleation-time fluid composition.
+//
+// CITATION CORRECTION NOTE (prerequisite, commit 68ee988)
+//
+//   W11 prep research caught two fabricated citations in v145:
+//   "Burton 1993 / Wright 1999" for the Kim cycle-counter omega=100
+//   threshold (Burton 1993 is a review paper, not kinetics-vs-omega),
+//   and "Bischoff_Bishop_Mackenzie_1987" in thermo-carbonates.json
+//   (the actual 1987 paper is Bischoff, Mackenzie & Bishop, in GCA,
+//   not Am. Mineral.). Both were corrected pre-W11 in commit 68ee988
+//   so this v146 commit lands on a clean citation base.
+//
+// SETTINGS FLIPPED
+//   js/32b-supersat-carbonate-Ksp.ts:
+//     CARBONATE_KSP_ACTIVE_PER_MINERAL.HMC: false → true
+//   js/32-supersat-carbonate.ts:
+//     MINERAL_GATES_HMC: new entry. sigma_crit 2.0 (above calcite's
+//     1.5; HMC has slightly higher heterogeneous-nucleation barrier
+//     due to Mg-substituted lattice surface energy per Davis 2000).
+//     T_min 0, T_max 60 (above 60°C, conversion to dolomite or
+//     aragonite dominates per Burton-Walter 1987). pH 7.0-10.5.
+//     supersaturation_HMC method added with Mg/Ca 0.5-30 gate.
+//   js/52-engines-carbonate.ts:
+//     grow_HMC function added — flag-gated dispatch to HMCRate (which
+//     bakes in Davis 2000 Mg-poisoning sigmoid). Three habits:
+//     micritic (default), high_Mg_micritic (mg_content > 0.20),
+//     recrystallized_HMC (high σ + cool T). Acid dissolution faster
+//     than calcite (pH < 6 vs calcite's pH < 5.5) per Bischoff 1987.
+//   js/82-nucleation-carbonate.ts:
+//     _nuc_HMC function added with RNG-cascade guard. Substrate
+//     priority: on-calcite (0.45) > on-aragonite (0.35) > vug-wall.
+//     mg_content set on crystal at nucleation from fluid Mg/Ca.
+//   js/65-mineral-engines.ts:
+//     MINERAL_ENGINES.HMC: grow_HMC
+//   js/42-mineral-gates-registry.ts:
+//     MINERAL_GATES_REGISTRY.HMC: MINERAL_GATES_HMC
+//   data/minerals.json:
+//     Full HMC entry inserted between dolomite and siderite. Three
+//     habit_variants, full description with primary refs, solid-
+//     solution note, scenarios list.
+//
+// PER-SCENARIO HMC DRIFT (v145 → v146): see commit.
+//
+// REFERENCES (all verified during W11 prep research)
+//   Bischoff, W.D., Mackenzie, F.T. & Bishop, F.C. (1987) "Stabilities
+//     of synthetic magnesian calcites in aqueous solution: comparison
+//     with biogenic materials." Geochim. Cosmochim. Acta 51:1413-1423.
+//   Davis, K.J., Dove, P.M. & De Yoreo, J.J. (2000) "The role of
+//     Mg²⁺ as an impurity in calcite growth." Science 290:1134-1137.
+//   Goldsmith, J.R. & Graf, D.L. (1958) "Relation between lattice
+//     constants and composition of the Ca-Mg carbonates." Am. Mineral.
+//     43:84-101. — XRD d104 discriminator.
+//   Burton, E.A. & Walter, L.M. (1987) "Relative precipitation rates
+//     of aragonite and Mg calcite from seawater: temperature or
+//     carbonate ion control?" Geology 15:111-114.
+//   Kim, J., Kimura, Y., Putnis, C.V., Putnis, A., Lee, M.R. & Sun, W.
+//     (2023) "Dissolution enables dolomite crystal growth." Science
+//     382:915-920. doi:10.1126/science.adi3690
+//   Morse, J.W. & Mackenzie, F.T. (1990) "Geochemistry of Sedimentary
+//     Carbonates." Developments in Sedimentology 48. Elsevier.
+//   Mucci, A. & Morse, J.W. (1983) "The incorporation of Mg²⁺ and
+//     Sr²⁺ into calcite overgrowths: influences of growth rate and
+//     solution composition." Geochim. Cosmochim. Acta 47:217-233.
+//
+// WHAT v146 SHIPS
+//   js/15-version.ts: this block + SIM_VERSION 145 → 146
+//   js/32-supersat-carbonate.ts: MINERAL_GATES_HMC + supersaturation_HMC
+//   js/32b-supersat-carbonate-Ksp.ts: HMC flag flipped
+//   js/52-engines-carbonate.ts: grow_HMC function
+//   js/82-nucleation-carbonate.ts: _nuc_HMC + iterator wiring
+//   js/65-mineral-engines.ts: HMC engine wiring
+//   js/42-mineral-gates-registry.ts: HMC gate registry
+//   data/minerals.json: full HMC entry
+//   tests-js/baselines/seed42_v146.json: regenerated baseline
+//   tests-js/carbonate-week11-promotion.test.ts: validation tests
+const SIM_VERSION = 146;
 
 // ── 18-constants.js ──
 
@@ -12842,6 +12946,14 @@ const MINERAL_STOICHIOMETRY = {
     calcite: { Ca: 1, CO3: 1 }, // CaCO3
     aragonite: { Ca: 1, CO3: 1 }, // CaCO3 (orthorhombic)
     dolomite: { Ca: 1, Mg: 1, CO3: 2 }, // CaMg(CO3)2
+    // v146 Week 11: HMC = Ca(1-x)Mg(x)CO3 with variable x = 0.05-0.30.
+    // Approximation: use x ≈ 0.10 average (canonical marine HMC). The
+    // exact per-crystal mg_content is stored in crystal._mg_content but
+    // mass-balance treats HMC as composition-averaged. Real crystals
+    // have slight under-debit for Ca and slight over-debit for Mg at
+    // x > 0.10; reverse for x < 0.10. Errors are small (a few percent
+    // of Ca and Mg consumption).
+    HMC: { Ca: 0.9, Mg: 0.1, CO3: 1 }, // Ca(0.9)Mg(0.1)CO3 (canonical)
     siderite: { Fe: 1, CO3: 1 }, // FeCO3
     rhodochrosite: { Mn: 1, CO3: 1 }, // MnCO3
     smithsonite: { Zn: 1, CO3: 1 }, // ZnCO3
@@ -13250,6 +13362,7 @@ const MINERAL_DISSOLUTION_RATES = {
     // (zone-dependent, stays inline).
     calcite: { Ca: 0.5, CO3: 0.3 }, // major species only; trace Mn/Fe stay inline
     dolomite: { Ca: 0.3, Mg: 0.3, CO3: 0.5 }, // acid dissolution
+    HMC: { Ca: 0.7, Mg: 0.15, CO3: 0.7 }, // v146 Week 11 — pH<6 acid dissolution; faster than calcite (Mg-substituted lattice less stable per Bischoff 1987)
     siderite: { Fe: 0.5, CO3: 0.4 }, // two engine triggers (oxidative + acid), same rates
     malachite: { Cu: 0.8, CO3: 0.5 }, // acid dissolution
     smithsonite: { Zn: 0.6, CO3: 0.4 }, // acid attack
@@ -18605,6 +18718,30 @@ const MINERAL_GATES_dolomite = {
     _sources: ['dolomite engine v17+', 'Kim 2023', 'Morse & Arvidson 2002'],
     _notes: 'Mg/Ca window 0.3-30. T floor lowered to 10°C (Kim 2023) — ambient T thermodynamically fine, kinetics handled by ordering factor. v145 SI engine: sigma is textbook omega; sigma_crit 10 acknowledges nucleation kinetic barrier separate from the Kim f_ord ordering gate.',
 };
+const MINERAL_GATES_HMC = {
+    // High-Magnesium Calcite Ca(1-x)Mg(x)CO3 with x ≈ 0.05-0.30.
+    // The disordered Mg-substituted calcite phase that's the kinetic
+    // precursor to ordered dolomite (Kim 2023 cyclic-omega mechanism).
+    // Forms as marine + sabkha cement and biogenic skeletons
+    // (echinoderms, coralline algae, foraminifera). Not a discrete IMA
+    // species — a varietal-name on the calcite-dolomite solid-solution
+    // joining ordered dolomite at x ≥ ~0.45.
+    //
+    // sigma_crit: SI-engine omega scale, comparable to calcite (1.5)
+    // but tighter — HMC is a metastable intermediate, so a meaningful
+    // kinetic barrier prevents over-firing at marginal supersaturation.
+    // Empirical sigma_crit (when flag is off) is in ppm-style ratio.
+    // v146 sigma_crit: 2.0 (slightly above calcite's 1.5; HMC nucleates
+    // less readily than pure calcite because the Mg-substituted lattice
+    // has higher surface energy per Davis 2000).
+    sigma_crit: 2.0,
+    T_min: 0, T_max: 60, T_optimal: 25,
+    fluid_min: { Ca: 10, Mg: 5, CO3: 20 },
+    pH_min: 7.0, pH_max: 10.5,
+    surface_energy: 'medium',
+    _sources: ['Bischoff_Mackenzie_Bishop_1987', 'Morse_Mackenzie_1990', 'Davis_2000', 'Kim_2023', 'Goldsmith_Graf_1958'],
+    _notes: 'Mg/Ca window 0.5-30. T_max 60°C (above this, conversion to ordered dolomite or aragonite dominates per Burton & Walter 1987). Marine/sabkha cement + biogenic. Solid-solution composition — mg_content is per-crystal state, predicted from fluid Mg/Ca at nucleation per Mucci-Morse 1983 partitioning. Distinguishable from calcite/dolomite by XRD d104 peak shift (Goldsmith & Graf 1958).',
+};
 const MINERAL_GATES_siderite = {
     sigma_crit: 1.0,
     T_min: 20, T_max: 300, T_optimal: 100,
@@ -18828,6 +18965,66 @@ Object.assign(VugConditions.prototype, {
             sigma *= Math.max(0.3, 1.0 - (this.temperature - 250) / 200.0);
         if (this.fluid.pH < 6.5)
             sigma -= (6.5 - this.fluid.pH) * 0.3;
+        return Math.max(sigma, 0);
+    },
+    supersaturation_HMC() {
+        // High-Magnesium Calcite Ca(1-x)Mg(x)CO3, x ≈ 0.05-0.30.
+        // Disordered Mg-substituted calcite intermediate. Kinetic precursor
+        // to ordered dolomite (Kim 2023 cyclic mechanism); persists as a
+        // metastable phase without cycling. Solubility per Bischoff,
+        // Mackenzie & Bishop 1987 GCA 51:1413: Ksp scales linearly with
+        // mol-% Mg (~0.1 log unit per mol% Mg).
+        //
+        // The mg_content of a given crystal is per-crystal state. For
+        // NUCLEATION GATE purposes, the supersaturation function uses
+        // x=0.10 (a representative marine/sabkha HMC composition per
+        // Mucci-Morse 1983 fluid-mineral partitioning). The actual
+        // crystal._mg_content is set at nucleation from fluid Mg/Ca, and
+        // the GROW engine reads that for the kinetic rate calc.
+        const g = MINERAL_GATES_HMC;
+        if (this.fluid.Ca < g.fluid_min.Ca || this.fluid.Mg < g.fluid_min.Mg || effectiveCO3(this.fluid, this.temperature) < g.fluid_min.CO3)
+            return 0;
+        if (this.temperature < g.T_min || this.temperature > g.T_max)
+            return 0;
+        if (this.fluid.pH < g.pH_min || this.fluid.pH > g.pH_max)
+            return 0;
+        const mg_ratio = this.fluid.Mg / Math.max(this.fluid.Ca, 0.01);
+        if (mg_ratio < 0.5 || mg_ratio > 30.0)
+            return 0;
+        // Reference mg_content for nucleation gate. Use 0.10 (10 mol% Mg)
+        // as the canonical marine-HMC composition.
+        const REF_MG_CONTENT = 0.10;
+        if (kspSupersatActiveFor('HMC'))
+            return carbonateEngineSigma('HMC', this.fluid, this.temperature, REF_MG_CONTENT);
+        // Empirical fallback (flag-off): calcite-like formula with
+        // Mg-substitution accounted for via a milder eq, and damped by
+        // distance from the optimum Mg/Ca ≈ 4 (marine seawater equivalent).
+        // Conservative — HMC is geologically a sometimes-mineral, not a
+        // default precipitator.
+        const eq = 320.0 * Math.exp(-0.005 * this.temperature); // Slightly more soluble than calcite
+        if (eq <= 0)
+            return 0;
+        // Geometric mean of (Ca · CO3) — same calcite-style Q with Mg as a
+        // multiplicative modifier.
+        const ca_co3 = Math.sqrt(this.fluid.Ca * effectiveCO3(this.fluid, this.temperature));
+        let sigma = ca_co3 / eq;
+        if (ACTIVITY_CORRECTED_SUPERSAT)
+            sigma *= activityCorrectionFactor(this.fluid, 'HMC');
+        // Mg-presence boost (HMC needs Mg in fluid — more Mg = more HMC
+        // favorability up to the optimum near Mg/Ca ≈ 4; above that
+        // aragonite/dolomite take over).
+        if (mg_ratio < 4.0)
+            sigma *= 1.0 + 0.25 * mg_ratio;
+        else
+            sigma *= Math.max(0.4, 2.0 - mg_ratio / 8.0);
+        // pH boost (alkaline-favored, like calcite)
+        if (this.fluid.pH > 7.5)
+            sigma *= Math.pow(2.0, this.fluid.pH - 7.5);
+        // T preference: HMC favored at low T (sabkha/marine cool conditions).
+        // Above 30°C, aragonite kinetic preference takes over per
+        // Burton & Walter 1987 GCA 51:777.
+        if (this.temperature > 30)
+            sigma *= Math.max(0.3, 1.0 - (this.temperature - 30) / 30);
         return Math.max(sigma, 0);
     },
     supersaturation_rhodochrosite() {
@@ -19295,6 +19492,10 @@ let CARBONATE_KSP_ACTIVE = true;
 // (0.30 + 0.70 * f_ord) factor); sigma_crit promoted to 10 in the
 // MINERAL_GATES entry to acknowledge the heterogeneous-nucleation
 // margin without double-counting Kim's f_ord gate.
+// v146 (Week 11): HMC flipped to true. The disordered Mg-calcite
+// precursor to ordered dolomite per Kim 2023; mg_content is per-
+// crystal state (set at nucleation from fluid Mg/Ca per Mucci-Morse
+// 1983) and threaded through saturationIndex_HMC + HMCRate.
 const CARBONATE_KSP_ACTIVE_PER_MINERAL = {
     calcite: true,
     aragonite: false,
@@ -19308,7 +19509,7 @@ const CARBONATE_KSP_ACTIVE_PER_MINERAL = {
     malachite: false,
     azurite: false,
     hydrozincite: false,
-    HMC: false,
+    HMC: true,
     // rosasite + aurichalcite intentionally absent — no thermo data,
     // would be no-ops if flipped.
 };
@@ -25735,6 +25936,7 @@ const MINERAL_GATES_REGISTRY = {
     calcite: MINERAL_GATES_calcite,
     aragonite: MINERAL_GATES_aragonite,
     dolomite: MINERAL_GATES_dolomite,
+    HMC: MINERAL_GATES_HMC, // v146 Week 11 — disordered Mg-calcite (Kim 2023 precursor)
     siderite: MINERAL_GATES_siderite,
     rhodochrosite: MINERAL_GATES_rhodochrosite,
     malachite: MINERAL_GATES_malachite,
@@ -27439,6 +27641,79 @@ function grow_dolomite(crystal, conditions, step) {
         trace_Fe: conditions.fluid.Fe * 0.08,
         trace_Mn: conditions.fluid.Mn * 0.05,
         note: `${crystal.habit} — ${color_note}${order_note}`,
+    });
+}
+// v146 (Week 11): HMC (High-Magnesium Calcite) — disordered
+// Ca(1-x)Mg(x)CO3 with x ≈ 0.05-0.30. Kinetic precursor to ordered
+// dolomite per Kim 2023; persists as metastable Mg-rich calcite
+// intermediate without cycling. The mg_content is per-crystal state,
+// set at nucleation from fluid Mg/Ca (Mucci-Morse 1983 partitioning).
+function grow_HMC(crystal, conditions, step) {
+    const sigma = conditions.supersaturation_HMC();
+    if (sigma < 1.0) {
+        // Acid dissolution — HMC dissolves more readily than calcite due
+        // to higher Ksp of the Mg-substituted lattice (Bischoff-Mackenzie-
+        // Bishop 1987). pH < 6 threshold (vs calcite's 5.5).
+        if (crystal.total_growth_um > 5 && conditions.fluid.pH < 6.0) {
+            crystal.dissolved = true;
+            const dissolved_um = Math.min(6.0, crystal.total_growth_um * 0.18);
+            return new GrowthZone({
+                step, temperature: conditions.temperature,
+                thickness_um: -dissolved_um, growth_rate: -dissolved_um,
+                note: `acid dissolution (pH ${conditions.fluid.pH.toFixed(1)}) — disordered HMC lattice less stable than pure calcite`
+            });
+        }
+        return null;
+    }
+    // Read crystal's stored mg_content (set at nucleation). If absent
+    // (legacy data), default to 0.10 — a representative marine HMC value.
+    const mg_content = typeof crystal._mg_content === 'number' ? crystal._mg_content : 0.10;
+    // Growth rate dispatch — v146 Week 11: when HMC SI flag is on,
+    // delegate the rate to PWP kinetics via HMCRate (which is calcite
+    // PWP with Mg-poisoning sigmoid already baked in per Davis 2000).
+    // Same flag gate pattern as W9 calcite + W10 dolomite. Empirical
+    // 3.5 × excess formula stays as fallback.
+    const excess = sigma - 1.0;
+    let rate;
+    if (kspSupersatActiveFor('HMC')) {
+        const pwp_mol = HMCRate(conditions.fluid, conditions.temperature, mg_content);
+        rate = pwpRateToSimMicronsPerStep('calcite', pwp_mol) * rng.uniform(0.7, 1.3); // calcite Vm; close enough for Mg-substituted lattice
+        if (rate < 0)
+            rate = 0;
+    }
+    else {
+        rate = 3.5 * excess * rng.uniform(0.8, 1.2); // somewhat slower than calcite per Davis 2000 Mg poisoning
+    }
+    // Habit dispatch — HMC is overwhelmingly a microcrystalline cement
+    // in real geology (Coorong dolomite/HMC ambiguity aside). Discrete
+    // cabinet-grade HMC is rare. Per Bischoff-Mackenzie-Bishop 1987 +
+    // Morse-Mackenzie 1990 chapter on diagenetic stabilization.
+    if (excess > 1.5 && conditions.temperature < 35) {
+        crystal.habit = 'recrystallized_HMC';
+        crystal.dominant_forms = ['small rhombohedral aggregates', 'incipient ordered domains'];
+    }
+    else if (mg_content > 0.20) {
+        crystal.habit = 'high_Mg_micritic';
+        crystal.dominant_forms = ['microcrystalline cement', 'gray-white groundmass', `${(mg_content * 100).toFixed(0)} mol% Mg`];
+    }
+    else {
+        crystal.habit = 'micritic';
+        crystal.dominant_forms = ['fine-grained cement', 'matrix-supporting', `${(mg_content * 100).toFixed(0)} mol% Mg`];
+    }
+    // Substrate note — HMC often replaces or overgrows calcite/aragonite
+    const pos = crystal.position || '';
+    let prov_note = '';
+    if (pos.includes('calcite'))
+        prov_note = ` [Mg-substituted overgrowth on calcite]`;
+    else if (pos.includes('aragonite'))
+        prov_note = ` [HMC cement post-aragonite recrystallization]`;
+    return new GrowthZone({
+        step, temperature: conditions.temperature,
+        thickness_um: rate, growth_rate: rate,
+        trace_Mg: conditions.fluid.Mg * 0.04, // crystal Mg trace (small relative to lattice Mg)
+        trace_Fe: conditions.fluid.Fe * 0.06,
+        trace_Mn: conditions.fluid.Mn * 0.04,
+        note: `${crystal.habit}${prov_note} — disordered Ca-Mg carbonate (x = ${mg_content.toFixed(2)}); will recrystallize to LMC over geological time without cycling, or to ordered dolomite under Kim 2023 cyclic-Ω mechanism`,
     });
 }
 function grow_siderite(crystal, conditions, step) {
@@ -35485,6 +35760,10 @@ const MINERAL_ENGINES = {
     siderite: grow_siderite,
     rhodochrosite: grow_rhodochrosite,
     dolomite: grow_dolomite,
+    // v146 (Week 11): HMC — disordered Mg-calcite Ca(1-x)Mg(x)CO3, x=0.05-0.30.
+    // Kinetic precursor to ordered dolomite per Kim 2023; persists metastable
+    // without cycling. Per-crystal mg_content state.
+    HMC: grow_HMC,
     sphalerite: grow_sphalerite,
     wurtzite: grow_wurtzite,
     fluorite: grow_fluorite,
@@ -38681,6 +38960,40 @@ function _nuc_dolomite(sim) {
         const c = sim.nucleate('dolomite', pos, sigma_dol);
         sim.log.push(`  ✦ NUCLEATION: Dolomite #${c.crystal_id} on ${c.position} (T=${sim.conditions.temperature.toFixed(0)}°C, Mg/Ca=${mg_ratio.toFixed(2)}, σ=${sigma_dol.toFixed(2)})`);
     }
+    // HMC nucleation — disordered Mg-substituted calcite, the Kim 2023
+    // precursor to ordered dolomite.
+}
+function _nuc_HMC(sim) {
+    const sigma_hmc = sim.conditions.supersaturation_HMC();
+    if (sigma_hmc < MINERAL_GATES_HMC.sigma_crit)
+        return; // RNG-cascade guard — DO NOT MOVE
+    if (sim._atNucleationCap('HMC'))
+        return;
+    const existing_hmc = sim.crystals.filter(c => c.mineral === 'HMC' && c.active);
+    // Allow multiple HMC crystals (it's a cement-phase mineral, often
+    // covering multiple wall positions).
+    if (existing_hmc.length >= 4)
+        return;
+    // Substrate priority: HMC overgrows existing calcite or aragonite
+    // (Mg-substituted overgrowth diagenesis per Morse-Mackenzie 1990).
+    // Otherwise nucleates directly on the vug wall.
+    let pos = 'vug wall';
+    const existing_cal_h = sim.crystals.filter(c => c.mineral === 'calcite' && c.active);
+    const existing_arg_h = sim.crystals.filter(c => c.mineral === 'aragonite' && c.active);
+    if (existing_cal_h.length && rng.random() < 0.45)
+        pos = `on calcite #${existing_cal_h[0].crystal_id}`;
+    else if (existing_arg_h.length && rng.random() < 0.35)
+        pos = `on aragonite #${existing_arg_h[0].crystal_id}`;
+    // Compute crystal._mg_content from fluid Mg/Ca at nucleation time
+    // per Mucci-Morse 1983 partitioning. Empirical linear approximation
+    // calibrated for marine/sabkha conditions:
+    //   mg_content ≈ 0.05 + 0.02 × (Mg/Ca - 1), capped at 0.30
+    // At Mg/Ca=1: 5% Mg. At Mg/Ca=5: 13%. At Mg/Ca=15: 30%.
+    const mg_ratio = sim.conditions.fluid.Mg / Math.max(sim.conditions.fluid.Ca, 0.01);
+    const mg_content = Math.max(0.04, Math.min(0.30, 0.05 + 0.02 * (mg_ratio - 1.0)));
+    const c = sim.nucleate('HMC', pos, sigma_hmc);
+    c._mg_content = mg_content; // per-crystal state for grow_HMC + SI engine
+    sim.log.push(`  ✦ NUCLEATION: ⚪ HMC #${c.crystal_id} on ${c.position} (T=${sim.conditions.temperature.toFixed(0)}°C, Mg/Ca=${mg_ratio.toFixed(2)}, x=${mg_content.toFixed(2)} mol Mg, σ=${sigma_hmc.toFixed(2)}) — disordered Mg-calcite intermediate, kinetic precursor to ordered dolomite per Kim 2023`);
     // Siderite nucleation — Fe carbonate, brown rhomb. Reducing only.
 }
 function _nuc_siderite(sim) {
@@ -38905,6 +39218,7 @@ function _nucleateClass_carbonate(sim) {
     _nuc_calcite(sim);
     _nuc_aragonite(sim);
     _nuc_dolomite(sim);
+    _nuc_HMC(sim); // v146 Week 11 — disordered Mg-calcite, Kim 2023 precursor
     _nuc_siderite(sim);
     _nuc_rhodochrosite(sim);
     _nuc_malachite(sim);

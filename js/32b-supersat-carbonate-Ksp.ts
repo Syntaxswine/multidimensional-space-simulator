@@ -139,6 +139,10 @@ let CARBONATE_KSP_ACTIVE = true;
 // (0.30 + 0.70 * f_ord) factor); sigma_crit promoted to 10 in the
 // MINERAL_GATES entry to acknowledge the heterogeneous-nucleation
 // margin without double-counting Kim's f_ord gate.
+// v146 (Week 11): HMC flipped to true. The disordered Mg-calcite
+// precursor to ordered dolomite per Kim 2023; mg_content is per-
+// crystal state (set at nucleation from fluid Mg/Ca per Mucci-Morse
+// 1983) and threaded through saturationIndex_HMC + HMCRate.
 const CARBONATE_KSP_ACTIVE_PER_MINERAL: Record<string, boolean> = {
   calcite:        true,
   aragonite:      false,
@@ -152,7 +156,7 @@ const CARBONATE_KSP_ACTIVE_PER_MINERAL: Record<string, boolean> = {
   malachite:      false,
   azurite:        false,
   hydrozincite:   false,
-  HMC:            false,
+  HMC:            true,
   // rosasite + aurichalcite intentionally absent — no thermo data,
   // would be no-ops if flipped.
 };

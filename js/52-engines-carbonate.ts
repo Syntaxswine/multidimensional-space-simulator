@@ -309,6 +309,79 @@ function grow_dolomite(crystal, conditions, step) {
   });
 }
 
+// v146 (Week 11): HMC (High-Magnesium Calcite) — disordered
+// Ca(1-x)Mg(x)CO3 with x ≈ 0.05-0.30. Kinetic precursor to ordered
+// dolomite per Kim 2023; persists as metastable Mg-rich calcite
+// intermediate without cycling. The mg_content is per-crystal state,
+// set at nucleation from fluid Mg/Ca (Mucci-Morse 1983 partitioning).
+function grow_HMC(crystal, conditions, step) {
+  const sigma = conditions.supersaturation_HMC();
+  if (sigma < 1.0) {
+    // Acid dissolution — HMC dissolves more readily than calcite due
+    // to higher Ksp of the Mg-substituted lattice (Bischoff-Mackenzie-
+    // Bishop 1987). pH < 6 threshold (vs calcite's 5.5).
+    if (crystal.total_growth_um > 5 && conditions.fluid.pH < 6.0) {
+      crystal.dissolved = true;
+      const dissolved_um = Math.min(6.0, crystal.total_growth_um * 0.18);
+      return new GrowthZone({
+        step, temperature: conditions.temperature,
+        thickness_um: -dissolved_um, growth_rate: -dissolved_um,
+        note: `acid dissolution (pH ${conditions.fluid.pH.toFixed(1)}) — disordered HMC lattice less stable than pure calcite`
+      });
+    }
+    return null;
+  }
+
+  // Read crystal's stored mg_content (set at nucleation). If absent
+  // (legacy data), default to 0.10 — a representative marine HMC value.
+  const mg_content = typeof crystal._mg_content === 'number' ? crystal._mg_content : 0.10;
+
+  // Growth rate dispatch — v146 Week 11: when HMC SI flag is on,
+  // delegate the rate to PWP kinetics via HMCRate (which is calcite
+  // PWP with Mg-poisoning sigmoid already baked in per Davis 2000).
+  // Same flag gate pattern as W9 calcite + W10 dolomite. Empirical
+  // 3.5 × excess formula stays as fallback.
+  const excess = sigma - 1.0;
+  let rate;
+  if (kspSupersatActiveFor('HMC')) {
+    const pwp_mol = HMCRate(conditions.fluid, conditions.temperature, mg_content);
+    rate = pwpRateToSimMicronsPerStep('calcite', pwp_mol) * rng.uniform(0.7, 1.3);  // calcite Vm; close enough for Mg-substituted lattice
+    if (rate < 0) rate = 0;
+  } else {
+    rate = 3.5 * excess * rng.uniform(0.8, 1.2);  // somewhat slower than calcite per Davis 2000 Mg poisoning
+  }
+
+  // Habit dispatch — HMC is overwhelmingly a microcrystalline cement
+  // in real geology (Coorong dolomite/HMC ambiguity aside). Discrete
+  // cabinet-grade HMC is rare. Per Bischoff-Mackenzie-Bishop 1987 +
+  // Morse-Mackenzie 1990 chapter on diagenetic stabilization.
+  if (excess > 1.5 && conditions.temperature < 35) {
+    crystal.habit = 'recrystallized_HMC';
+    crystal.dominant_forms = ['small rhombohedral aggregates', 'incipient ordered domains'];
+  } else if (mg_content > 0.20) {
+    crystal.habit = 'high_Mg_micritic';
+    crystal.dominant_forms = ['microcrystalline cement', 'gray-white groundmass', `${(mg_content * 100).toFixed(0)} mol% Mg`];
+  } else {
+    crystal.habit = 'micritic';
+    crystal.dominant_forms = ['fine-grained cement', 'matrix-supporting', `${(mg_content * 100).toFixed(0)} mol% Mg`];
+  }
+
+  // Substrate note — HMC often replaces or overgrows calcite/aragonite
+  const pos = crystal.position || '';
+  let prov_note = '';
+  if (pos.includes('calcite')) prov_note = ` [Mg-substituted overgrowth on calcite]`;
+  else if (pos.includes('aragonite')) prov_note = ` [HMC cement post-aragonite recrystallization]`;
+
+  return new GrowthZone({
+    step, temperature: conditions.temperature,
+    thickness_um: rate, growth_rate: rate,
+    trace_Mg: conditions.fluid.Mg * 0.04,  // crystal Mg trace (small relative to lattice Mg)
+    trace_Fe: conditions.fluid.Fe * 0.06,
+    trace_Mn: conditions.fluid.Mn * 0.04,
+    note: `${crystal.habit}${prov_note} — disordered Ca-Mg carbonate (x = ${mg_content.toFixed(2)}); will recrystallize to LMC over geological time without cycling, or to ordered dolomite under Kim 2023 cyclic-Ω mechanism`,
+  });
+}
+
 function grow_siderite(crystal, conditions, step) {
   const sigma = conditions.supersaturation_siderite();
   if (sigma < 1.0) {

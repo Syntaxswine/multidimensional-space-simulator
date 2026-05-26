@@ -40,15 +40,15 @@ describe('PROPOSAL-CARBONATE-GEOCHEM Week 9 — calcite engine promotion (v144)'
     expect(kspSupersatActiveFor('calcite')).toBe(true);
   });
 
-  it('calcite remains promoted alongside dolomite at v145 (siderite/HMC/aragonite still empirical)', () => {
-    // v144 only calcite was promoted; v145 added dolomite. Week 11
-    // will flip HMC (blocked on vugg-add-mineral); Week 12 aragonite.
-    // The other carbonates should still be on the empirical engine.
+  it('calcite remains promoted alongside dolomite + HMC at v146 (siderite/aragonite still empirical)', () => {
+    // v144 calcite; v145 dolomite; v146 HMC. Week 12 aragonite is the
+    // remaining promotion. Siderite stays C-tier kinetic confidence
+    // (deferred pending better rate-law constraint).
     expect(kspSupersatActiveFor('calcite')).toBe(true);   // since v144
     expect(kspSupersatActiveFor('dolomite')).toBe(true);  // since v145
+    expect(kspSupersatActiveFor('HMC')).toBe(true);       // since v146
     expect(kspSupersatActiveFor('aragonite')).toBe(false);
     expect(kspSupersatActiveFor('siderite')).toBe(false);
-    expect(kspSupersatActiveFor('HMC')).toBe(false);
   });
 
   it('supersaturation_calcite returns omega (not empirical sigma) at v144', () => {

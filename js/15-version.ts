@@ -7952,5 +7952,109 @@
 //   tests-js/baselines/seed42_v145.json: regenerated baseline
 //   tests-js/carbonate-week10-promotion.test.ts: validation tests
 //   tools/w10_dolomite_calibration_probe.mjs: prep diagnostic
-const SIM_VERSION = 145;
+// ----------------------------------------------------------------
+// v146 (2026-05-26): PROPOSAL-CARBONATE-GEOCHEM Phase 1 Week 11 —
+// HMC mineral add + SI engine promotion. HMC (High-Magnesium Calcite,
+// the disordered Ca(1-x)Mg(x)CO3 intermediate with x ≈ 0.05-0.30) is
+// added as a MINERAL_SPEC entry via the vugg-add-mineral skill, AND
+// flipped onto the SI engine + PWP rate path. Combined commit because
+// the mineral-add and the promotion are the same coherent story:
+// HMC's whole reason-to-exist in the simulator is the Kim 2023
+// disordered-precursor-to-ordered-dolomite mechanism, which lives in
+// the SI engine + PWP layer, not the empirical engine.
+//
+// HMC was BLOCKED before this commit per the carbonate proposal —
+// the supersaturation + rate engine helpers (saturationIndex_HMC in
+// 32b, HMCRate in 52b) had been ready since Week 2 + Week 6, but
+// without a MINERAL_SPEC entry, no grow_HMC, no _nuc_HMC, and no
+// MINERAL_ENGINES wiring, HMC could never actually nucleate or fire.
+// W11 unblocks this stack.
+//
+// PER-CRYSTAL mg_content STATE
+//
+//   The mg_content of any individual HMC crystal is per-crystal state,
+//   set at nucleation from the fluid Mg/Ca per Mucci-Morse 1983
+//   partitioning (linear approximation: mg_content ≈ 0.05 + 0.02 ×
+//   (Mg/Ca - 1), capped at 0.30). It's stored on crystal._mg_content
+//   and threaded through saturationIndex_HMC + HMCRate at growth time.
+//
+//   This is the FIRST per-crystal-composition variable mineral in the
+//   sim. Other minerals are single-composition (calcite = CaCO3 only);
+//   HMC's mg_content is intrinsic to its chemistry and varies per
+//   crystal as a function of nucleation-time fluid composition.
+//
+// CITATION CORRECTION NOTE (prerequisite, commit 68ee988)
+//
+//   W11 prep research caught two fabricated citations in v145:
+//   "Burton 1993 / Wright 1999" for the Kim cycle-counter omega=100
+//   threshold (Burton 1993 is a review paper, not kinetics-vs-omega),
+//   and "Bischoff_Bishop_Mackenzie_1987" in thermo-carbonates.json
+//   (the actual 1987 paper is Bischoff, Mackenzie & Bishop, in GCA,
+//   not Am. Mineral.). Both were corrected pre-W11 in commit 68ee988
+//   so this v146 commit lands on a clean citation base.
+//
+// SETTINGS FLIPPED
+//   js/32b-supersat-carbonate-Ksp.ts:
+//     CARBONATE_KSP_ACTIVE_PER_MINERAL.HMC: false → true
+//   js/32-supersat-carbonate.ts:
+//     MINERAL_GATES_HMC: new entry. sigma_crit 2.0 (above calcite's
+//     1.5; HMC has slightly higher heterogeneous-nucleation barrier
+//     due to Mg-substituted lattice surface energy per Davis 2000).
+//     T_min 0, T_max 60 (above 60°C, conversion to dolomite or
+//     aragonite dominates per Burton-Walter 1987). pH 7.0-10.5.
+//     supersaturation_HMC method added with Mg/Ca 0.5-30 gate.
+//   js/52-engines-carbonate.ts:
+//     grow_HMC function added — flag-gated dispatch to HMCRate (which
+//     bakes in Davis 2000 Mg-poisoning sigmoid). Three habits:
+//     micritic (default), high_Mg_micritic (mg_content > 0.20),
+//     recrystallized_HMC (high σ + cool T). Acid dissolution faster
+//     than calcite (pH < 6 vs calcite's pH < 5.5) per Bischoff 1987.
+//   js/82-nucleation-carbonate.ts:
+//     _nuc_HMC function added with RNG-cascade guard. Substrate
+//     priority: on-calcite (0.45) > on-aragonite (0.35) > vug-wall.
+//     mg_content set on crystal at nucleation from fluid Mg/Ca.
+//   js/65-mineral-engines.ts:
+//     MINERAL_ENGINES.HMC: grow_HMC
+//   js/42-mineral-gates-registry.ts:
+//     MINERAL_GATES_REGISTRY.HMC: MINERAL_GATES_HMC
+//   data/minerals.json:
+//     Full HMC entry inserted between dolomite and siderite. Three
+//     habit_variants, full description with primary refs, solid-
+//     solution note, scenarios list.
+//
+// PER-SCENARIO HMC DRIFT (v145 → v146): see commit.
+//
+// REFERENCES (all verified during W11 prep research)
+//   Bischoff, W.D., Mackenzie, F.T. & Bishop, F.C. (1987) "Stabilities
+//     of synthetic magnesian calcites in aqueous solution: comparison
+//     with biogenic materials." Geochim. Cosmochim. Acta 51:1413-1423.
+//   Davis, K.J., Dove, P.M. & De Yoreo, J.J. (2000) "The role of
+//     Mg²⁺ as an impurity in calcite growth." Science 290:1134-1137.
+//   Goldsmith, J.R. & Graf, D.L. (1958) "Relation between lattice
+//     constants and composition of the Ca-Mg carbonates." Am. Mineral.
+//     43:84-101. — XRD d104 discriminator.
+//   Burton, E.A. & Walter, L.M. (1987) "Relative precipitation rates
+//     of aragonite and Mg calcite from seawater: temperature or
+//     carbonate ion control?" Geology 15:111-114.
+//   Kim, J., Kimura, Y., Putnis, C.V., Putnis, A., Lee, M.R. & Sun, W.
+//     (2023) "Dissolution enables dolomite crystal growth." Science
+//     382:915-920. doi:10.1126/science.adi3690
+//   Morse, J.W. & Mackenzie, F.T. (1990) "Geochemistry of Sedimentary
+//     Carbonates." Developments in Sedimentology 48. Elsevier.
+//   Mucci, A. & Morse, J.W. (1983) "The incorporation of Mg²⁺ and
+//     Sr²⁺ into calcite overgrowths: influences of growth rate and
+//     solution composition." Geochim. Cosmochim. Acta 47:217-233.
+//
+// WHAT v146 SHIPS
+//   js/15-version.ts: this block + SIM_VERSION 145 → 146
+//   js/32-supersat-carbonate.ts: MINERAL_GATES_HMC + supersaturation_HMC
+//   js/32b-supersat-carbonate-Ksp.ts: HMC flag flipped
+//   js/52-engines-carbonate.ts: grow_HMC function
+//   js/82-nucleation-carbonate.ts: _nuc_HMC + iterator wiring
+//   js/65-mineral-engines.ts: HMC engine wiring
+//   js/42-mineral-gates-registry.ts: HMC gate registry
+//   data/minerals.json: full HMC entry
+//   tests-js/baselines/seed42_v146.json: regenerated baseline
+//   tests-js/carbonate-week11-promotion.test.ts: validation tests
+const SIM_VERSION = 146;
 

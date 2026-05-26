@@ -59,22 +59,22 @@ describe('PROPOSAL-CARBONATE-GEOCHEM Week 2 — flag mechanism', () => {
     expect(CARBONATE_KSP_ACTIVE).toBe(true);
   });
 
-  it('per-mineral flags: calcite + dolomite true (v145); aragonite/siderite/HMC still false', () => {
+  it('per-mineral flags: calcite + dolomite + HMC true (v146); aragonite/siderite still false', () => {
     // Calcite was first promoted (Week 9 / v144). Dolomite second
-    // (Week 10 / v145). Aragonite is Week 12, HMC Week 11 — still
-    // pending. Each promotion is a single-mineral flip per the
-    // proposal's Week-9-12 discipline.
+    // (Week 10 / v145). HMC third (Week 11 / v146; mineral add +
+    // promotion combined). Aragonite is Week 12 — still pending.
     expect(CARBONATE_KSP_ACTIVE_PER_MINERAL.calcite).toBe(true);
     expect(CARBONATE_KSP_ACTIVE_PER_MINERAL.dolomite).toBe(true);
+    expect(CARBONATE_KSP_ACTIVE_PER_MINERAL.HMC).toBe(true);
     expect(CARBONATE_KSP_ACTIVE_PER_MINERAL.aragonite).toBe(false);
     expect(CARBONATE_KSP_ACTIVE_PER_MINERAL.siderite).toBe(false);
-    expect(CARBONATE_KSP_ACTIVE_PER_MINERAL.HMC).toBe(false);
   });
 
-  it('kspSupersatActiveFor returns true for calcite + dolomite (v145 state)', () => {
+  it('kspSupersatActiveFor returns true for calcite + dolomite + HMC (v146 state)', () => {
     expect(kspSupersatActiveFor('calcite')).toBe(true);
     expect(kspSupersatActiveFor('dolomite')).toBe(true);
-    const promoted = new Set(['calcite', 'dolomite']);
+    expect(kspSupersatActiveFor('HMC')).toBe(true);
+    const promoted = new Set(['calcite', 'dolomite', 'HMC']);
     for (const m of carbonatesWithSI()) {
       if (promoted.has(m)) continue;
       expect(kspSupersatActiveFor(m)).toBe(false);

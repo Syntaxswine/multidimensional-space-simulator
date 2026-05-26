@@ -59,6 +59,31 @@ const MINERAL_GATES_dolomite: MineralGates = {
   _notes: 'Mg/Ca window 0.3-30. T floor lowered to 10°C (Kim 2023) — ambient T thermodynamically fine, kinetics handled by ordering factor. v145 SI engine: sigma is textbook omega; sigma_crit 10 acknowledges nucleation kinetic barrier separate from the Kim f_ord ordering gate.',
 };
 
+const MINERAL_GATES_HMC: MineralGates = {
+  // High-Magnesium Calcite Ca(1-x)Mg(x)CO3 with x ≈ 0.05-0.30.
+  // The disordered Mg-substituted calcite phase that's the kinetic
+  // precursor to ordered dolomite (Kim 2023 cyclic-omega mechanism).
+  // Forms as marine + sabkha cement and biogenic skeletons
+  // (echinoderms, coralline algae, foraminifera). Not a discrete IMA
+  // species — a varietal-name on the calcite-dolomite solid-solution
+  // joining ordered dolomite at x ≥ ~0.45.
+  //
+  // sigma_crit: SI-engine omega scale, comparable to calcite (1.5)
+  // but tighter — HMC is a metastable intermediate, so a meaningful
+  // kinetic barrier prevents over-firing at marginal supersaturation.
+  // Empirical sigma_crit (when flag is off) is in ppm-style ratio.
+  // v146 sigma_crit: 2.0 (slightly above calcite's 1.5; HMC nucleates
+  // less readily than pure calcite because the Mg-substituted lattice
+  // has higher surface energy per Davis 2000).
+  sigma_crit: 2.0,
+  T_min: 0, T_max: 60, T_optimal: 25,
+  fluid_min: { Ca: 10, Mg: 5, CO3: 20 },
+  pH_min: 7.0, pH_max: 10.5,
+  surface_energy: 'medium',
+  _sources: ['Bischoff_Mackenzie_Bishop_1987', 'Morse_Mackenzie_1990', 'Davis_2000', 'Kim_2023', 'Goldsmith_Graf_1958'],
+  _notes: 'Mg/Ca window 0.5-30. T_max 60°C (above this, conversion to ordered dolomite or aragonite dominates per Burton & Walter 1987). Marine/sabkha cement + biogenic. Solid-solution composition — mg_content is per-crystal state, predicted from fluid Mg/Ca at nucleation per Mucci-Morse 1983 partitioning. Distinguishable from calcite/dolomite by XRD d104 peak shift (Goldsmith & Graf 1958).',
+};
+
 const MINERAL_GATES_siderite: MineralGates = {
   sigma_crit: 1.0,
   T_min: 20, T_max: 300, T_optimal: 100,
@@ -277,6 +302,57 @@ Object.assign(VugConditions.prototype, {
   sigma *= Math.exp(-ratio_distance * 1.0);
   if (this.temperature > 250) sigma *= Math.max(0.3, 1.0 - (this.temperature - 250) / 200.0);
   if (this.fluid.pH < 6.5) sigma -= (6.5 - this.fluid.pH) * 0.3;
+  return Math.max(sigma, 0);
+},
+
+  supersaturation_HMC() {
+  // High-Magnesium Calcite Ca(1-x)Mg(x)CO3, x ≈ 0.05-0.30.
+  // Disordered Mg-substituted calcite intermediate. Kinetic precursor
+  // to ordered dolomite (Kim 2023 cyclic mechanism); persists as a
+  // metastable phase without cycling. Solubility per Bischoff,
+  // Mackenzie & Bishop 1987 GCA 51:1413: Ksp scales linearly with
+  // mol-% Mg (~0.1 log unit per mol% Mg).
+  //
+  // The mg_content of a given crystal is per-crystal state. For
+  // NUCLEATION GATE purposes, the supersaturation function uses
+  // x=0.10 (a representative marine/sabkha HMC composition per
+  // Mucci-Morse 1983 fluid-mineral partitioning). The actual
+  // crystal._mg_content is set at nucleation from fluid Mg/Ca, and
+  // the GROW engine reads that for the kinetic rate calc.
+  const g = MINERAL_GATES_HMC;
+  if (this.fluid.Ca < g.fluid_min!.Ca || this.fluid.Mg < g.fluid_min!.Mg || effectiveCO3(this.fluid, this.temperature) < g.fluid_min!.CO3) return 0;
+  if (this.temperature < g.T_min! || this.temperature > g.T_max!) return 0;
+  if (this.fluid.pH < g.pH_min! || this.fluid.pH > g.pH_max!) return 0;
+  const mg_ratio = this.fluid.Mg / Math.max(this.fluid.Ca, 0.01);
+  if (mg_ratio < 0.5 || mg_ratio > 30.0) return 0;
+  // Reference mg_content for nucleation gate. Use 0.10 (10 mol% Mg)
+  // as the canonical marine-HMC composition.
+  const REF_MG_CONTENT = 0.10;
+  if (kspSupersatActiveFor('HMC')) return carbonateEngineSigma('HMC', this.fluid, this.temperature, REF_MG_CONTENT);
+
+  // Empirical fallback (flag-off): calcite-like formula with
+  // Mg-substitution accounted for via a milder eq, and damped by
+  // distance from the optimum Mg/Ca ≈ 4 (marine seawater equivalent).
+  // Conservative — HMC is geologically a sometimes-mineral, not a
+  // default precipitator.
+  const eq = 320.0 * Math.exp(-0.005 * this.temperature);  // Slightly more soluble than calcite
+  if (eq <= 0) return 0;
+  // Geometric mean of (Ca · CO3) — same calcite-style Q with Mg as a
+  // multiplicative modifier.
+  const ca_co3 = Math.sqrt(this.fluid.Ca * effectiveCO3(this.fluid, this.temperature));
+  let sigma = ca_co3 / eq;
+  if (ACTIVITY_CORRECTED_SUPERSAT) sigma *= activityCorrectionFactor(this.fluid, 'HMC');
+  // Mg-presence boost (HMC needs Mg in fluid — more Mg = more HMC
+  // favorability up to the optimum near Mg/Ca ≈ 4; above that
+  // aragonite/dolomite take over).
+  if (mg_ratio < 4.0) sigma *= 1.0 + 0.25 * mg_ratio;
+  else sigma *= Math.max(0.4, 2.0 - mg_ratio / 8.0);
+  // pH boost (alkaline-favored, like calcite)
+  if (this.fluid.pH > 7.5) sigma *= Math.pow(2.0, this.fluid.pH - 7.5);
+  // T preference: HMC favored at low T (sabkha/marine cool conditions).
+  // Above 30°C, aragonite kinetic preference takes over per
+  // Burton & Walter 1987 GCA 51:777.
+  if (this.temperature > 30) sigma *= Math.max(0.3, 1.0 - (this.temperature - 30) / 30);
   return Math.max(sigma, 0);
 },
 
