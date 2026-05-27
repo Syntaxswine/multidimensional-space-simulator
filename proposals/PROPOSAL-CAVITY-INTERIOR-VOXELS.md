@@ -342,69 +342,33 @@ Well under the 20-ms-ish target if we want it; comfortably under any reasonable 
 
 **Memory after this decision:** 7,680 voxels × ~50 fields × 8 bytes = ~3 MB. Negligible.
 
-### [OPEN] B. Wall cell ↔ boundary voxel: alias or sync?
+### [FIRM] B. Wall cell ↔ boundary voxel: ALIAS
 
-Option A (alias): `wall.cells[r*N+c].fluid === voxelGrid.voxelAt(r, c, 0).fluid` — same object, two access paths.
+**Decision (2026-05-27, boss):** alias. `wall.cells[r*N+c].fluid === voxelGrid.voxelAt(r, c, 0).fluid` — same object, two access paths. Matches the existing `ring_fluids[equator] === conditions.fluid` pattern; no drift between stores. Phase 1 constructor handles the aliasing at voxel-grid allocation time (wall mesh built first, voxel grid reuses the existing wall cell fluid objects for the d=0 slab).
 
-Option B (sync): separate fluid objects, sync periodically (e.g., end-of-step copy).
+### [FIRM] C. Engine boundary-layer view: SINGLE VOXEL (d=0)
 
-**Trade-off:** alias is simpler and avoids drift but makes the two stores semantically coupled (a write through one path is visible through the other immediately). Sync gives clearer semantic separation but introduces a sync window where the two stores can diverge.
+**Decision (2026-05-27, boss):** engines see only the boundary voxel `(r, c, 0)`. Simpler, most physically correct for thin boundary layers. v159 ships with this; revisit only if specific scenarios surface pathological behavior. Consumers wanting a near-wall average can compose via `sampleVoxelFluid(r, c, 0.5, field)` per the averaging-on-demand pattern.
 
-**Recommendation:** alias (Option A). Matches the existing pattern where `ring_fluids[equator] === conditions.fluid` was an alias. Phase 2 engine work assumes alias for the boundary-layer reads.
+### [FIRM] D. Density-driven settling: DEFER to v162+
 
-### [OPEN] C. Engine boundary-layer view: single voxel or averaged?
+**Decision (2026-05-27, boss):** defer. Phase 1 (v158) ships data model + diffusion. Phase 2 (v159) ships engine + event coupling, diffusion-only. Phase 3 (v160) ships visualization. Phase 4 (v161+) re-tunes scenarios. Density-driven settling is a v162-ish enhancement once the basic infrastructure is proven and we have a concrete scenario that needs emergent stratification rather than event-targeted stratification. Until then, scenarios that want stratification use the Phase 2 event-targeting API (`target: 'bottom'` for floor-loaded events, etc.).
 
-When an engine grows a crystal, does it see (a) just the boundary voxel `(r, c, 0)`, (b) an average of boundary + first interior shell `(r, c, 0..1)`, or (c) some other near-wall stencil?
+### [FIRM] E. Per-voxel temperature: YES from v158
 
-**Trade-off:** single voxel is simpler and reflects the most local view (most physically correct for very thin boundary layers). Averaged view smooths out per-voxel artifacts.
+**Decision (2026-05-27, boss):** per-voxel temperature in Phase 1. Small additional storage (~1 float per voxel × 7,680 voxels × 8 bytes = ~60 KB). Initial value = bulk temperature. v158 stores it but doesn't consume it (engines still read `ring_temperatures[]` for now). Phase 2 wires engines to read per-voxel T. Phase 4 (v161+) adds thermal convection on top without architectural surgery — the per-voxel T storage is already there.
 
-**Recommendation:** single voxel for v159; revisit if specific scenarios show pathological behavior.
+### [FIRM] F. Replay snapshot capture: v160 (visualization phase)
 
-### [OPEN] D. Density-driven settling for stratification
+**Decision (2026-05-27, boss):** defer to Phase 3 visualization. Phase 1 + 2 ship without voxel snapshot capture; replay shows wall-cell chemistry only via the existing snap path. When per-voxel rendering lands in v160, extend the snapshot schema to capture voxel chemistry too. At 4 radial slices, the snapshot growth is only 4× (modest); lossy options (lower temporal resolution, fewer chips, decimated radial axis) available if needed.
 
-Should the proposal include a buoyancy / settling term for dense brines? Without it, fluid stratification requires explicit `zone_chemistry` or event-targeted writes — you can't have it emerge from gravity acting on density differences.
+### [FIRM] G. `zone_chemistry` semantics: KEEP PER-RING
 
-The physics: if voxel A has higher salinity than voxel B directly above it, equilibrium has A settling. Implementation: extra term in the diffusion step that moves dense fluid downward (rate proportional to density difference × g).
+**Decision (2026-05-27, boss):** keep per-ring. Boundary voxels at that ring inherit the override (via alias); interior voxels (d=1,2,3) at that ring start at bulk. Per-voxel zone overrides are deferred to Phase 4+ if a scenario explicitly needs them (e.g., "inner shell at the top is meteoric, outer shell at the top is connate" — niche but possible). Existing `zoned_dripstone_cave` semantics preserved.
 
-**Trade-off:** adds real physics, makes stratification emergent, costs ~one extra ops-per-voxel per step. But it's a new equation to validate.
+### [FIRM] H. `_diffuseRingState` → voxel diffusion: MERGE
 
-**Recommendation:** defer to Phase 4. Phase 2 ships diffusion-only; stratification scenarios that need it use explicit event targeting in the interim. Add settling as a v162-ish enhancement once the basic infrastructure is proven.
-
-### [OPEN] E. Per-voxel temperature
-
-Should every voxel carry its own temperature, or stay per-ring?
-
-**Pro per-voxel:** enables thermal convection (Phase 4 dependency), allows depth-varying geothermal gradients.
-
-**Pro per-ring:** simpler, smaller memory, matches current architecture.
-
-**Recommendation:** per-voxel temperature in Phase 1 (it's small additional storage, ~1 float per voxel = ~120 KB), but no thermal convection physics yet. Thermal diffusion runs alongside chemistry diffusion. This lets Phase 4 add buoyancy without architectural surgery.
-
-### [OPEN] F. Replay snapshot capture
-
-`wall_state_history` currently captures per-ring chemistry for replay. Should it also capture per-voxel chemistry?
-
-**Pro:** replay through scenario time then shows spatial chemistry evolving — way more interesting than per-ring.
-
-**Con:** snapshot size grows by ~depth_count × — at depth=8, every snapshot is 8× bigger.
-
-**Recommendation:** Phase 3 (visualization) handles this. Phase 1 + 2 ship without snapshot capture; replay shows wall-cell chemistry only (via the existing snap path). When per-voxel rendering lands in Phase 3, extend the snapshot schema to capture voxel chemistry too. Consider lossy options (lower temporal resolution, fewer chips, decimated radial axis).
-
-### [OPEN] G. Interaction with zone_chemistry
-
-`zone_chemistry` currently sets initial per-ring chemistry overrides (used by `zoned_dripstone_cave` for ceiling/floor/wall differentiation). Post-voxelization, should `zone_chemistry` extend to per-voxel overrides, or stay per-ring (writing to the boundary voxel only)?
-
-**Recommendation:** stay per-ring in Phase 1 (boundary voxels at that ring get the override; interior voxels start at bulk). Phase 4+ can introduce per-voxel zone overrides if a scenario needs it (e.g., "the inner shell at the top is meteoric, the outer shell at the top is connate" — niche but possible).
-
-### [OPEN] H. How does the existing `_diffuseRingState` interact with voxel diffusion?
-
-`_diffuseRingState` currently calls `mesh.diffuse(rate, fieldNames, ring_temperatures)` on the wall mesh. Once voxels exist (aliased to depth=0), the wall-cell diffusion IS the d=0 slab of voxel diffusion. Either:
-
-- (a) Drop `_diffuseRingState` entirely; voxel diffusion handles everything.
-- (b) Keep `_diffuseRingState` as the wall-slab diffusion; voxel diffusion runs on slabs d > 0 only.
-- (c) Merge them; voxel diffusion is the canonical path.
-
-**Recommendation:** (c) merge. Phase 1 introduces voxel diffusion that covers ALL slabs (including d=0, which IS the wall via aliasing); `_diffuseRingState` gets folded into the new voxel diffuse call.
+**Decision (2026-05-27, boss):** merge. Voxel diffusion becomes the canonical path. Phase 1 introduces `voxelGrid.diffuse(rate, fieldNames)` which covers ALL slabs including d=0 (which IS the wall via aliasing); `_diffuseRingState` gets refactored to call voxel diffusion instead of `mesh.diffuse`. For v158 byte-identity: radial-coupling rate is 0 in v158 (each slab diffuses 2D in its own plane; d=0 produces identical wall-cell deltas to today's mesh.diffuse; d=1,2,3 stay uniform so their Laplacians are zero). Phase 2 turns on radial coupling at the same time it wires events/engines into the interior slabs.
 
 ---
 
