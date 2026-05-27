@@ -291,6 +291,37 @@ These are NOT engine work. They're the bigger-than-engine horizon the boss surfa
    - **Reference angle for sub-strip 1 = 0°** — need to verify whatever the helicoid uses today is sane (or pick a canonical reference if there isn't one).
    - **Performance impact of recording during the run** — sampling chip values is cheap (already happening for live display); persisting to IndexedDB at run-end (not per-step) is cheap. Streaming per-step writes might add latency; benchmark before committing to per-step writes.
 
+   **IMPLEMENTATION STATUS (built across v149–v154, 2026-05-26):**
+
+   The strip view arc shipped. v149–v154 closed the bedrock plus most of the v2–v3 lock-in design. Future builders pick up from the deferred list at the bottom.
+
+   | Version | Title | What landed |
+   |---|---|---|
+   | v149 | Bedrock | Dataset format (85f) + recorder (85g) + IndexedDB persistence (85h) + minimal UI tab (99k) + Random mode wiring + 14 tests. Helicoid-as-recorder reframe implemented. |
+   | v150 | v2 features | Strip View moved to mode-toggle tab bar (between Record Player + Library) + Simulation mode wiring + 24-sub-strip angular expansion + line bundling (y-snap within 2% normalized) + per-angle nucleation marker filtering + sub-strip favorites. |
+   | v151 | Height 3× | Strip canvas 24 → 72 px per boss feedback. Stroke 1 → 1.5, nucleation marker radius bumped, cy nudged off the bottom edge. |
+   | v152 | Height 100 | Strip canvas 72 → 100 px + stroke 1.5 → 1.25 per boss second pass. |
+   | v153 | Mode promotion | Promoted from floating overlay to proper mode tab (switchMode('stripview')) like Record Player. Strip width 860 → 1500 to fill mode-panel real estate. Close button removed. |
+   | v154 | Closeout pass | Fortress wiring (3 entry points + save-on-mode-leave in switchMode) + dynamic recorder capacity growth (_growCapacity) + Download / Upload .stripview file (gzipped via browser CompressionStream) + cross-sub-strip cursor on hover (vertical guide across all 24 expanded sub-strips at the same vug-height position). 15 tests pass. |
+
+   **What's WIRED for auto-capture (v154):**
+   - Simulation mode (`91-ui-legends.ts`)
+   - Random mode (`96-ui-random.ts`)
+   - Fortress mode — three entry points in `94-ui-menu.ts` (fortressBegin + fortressBeginFromScenario) and `97-ui-fortress.ts` (custom setup)
+
+   **Wiring still TODO:**
+   - Zen mode (`98a-ui-zen.ts`) — copy the Fortress pattern; treat mode-leave as save trigger
+   - Agent API (`99z-agent-interface.ts`) — agents rarely need replay capture; lower priority
+
+   **Helpers for future entry points** (in `94-ui-menu.ts`):
+   - `_attachStripRecorderToSim(sim, scenarioId, notes)` — attaches with 500-step initial allocation (grows on overflow); patches manifest.scenario_id; silent on failure
+   - `_saveStripRecorderIfPresent(sim)` — finalizes + saves to IDB; skips empty recordings (no pollution); idempotent
+
+   **Still deferred to v4+ (data model supports all of this; UI not built):**
+   - Favorite-based filters / export-only-favorites / comparison views (favorites are tracked in `_stripFavorites` map keyed by datasetKey; just needs UI to consume)
+   - Per-vertex spatial chemistry expansion (the load-bearing prerequisite for non-`wall` chips to actually vary across the 24 angular sub-strips — see direction 1 above)
+   - Auto-eviction of oldest IDB datasets when quota approached (current behavior: no eviction; user deletes manually via ✕ in the dataset list)
+
 3. **Filter system + record mode (the biggest).** DF-style work-order conditional UI (NOT movies — DF doesn't have those; the work-order conditional form is the relevant reference). Expression-tree underneath. Subject + operator + threshold + action. Composable AND/OR/NOT. Recording = scenario snap data + filter rules bundled. Branching from recording is the killer feature.
 
 Sequencing (boss-agreed last session):
