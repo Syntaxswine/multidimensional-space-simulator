@@ -156,6 +156,45 @@ function _ensureStripViewStyles(): void {
       gap: 4px;
       align-items: stretch;
     }
+    .strip-view-row.is-expanded > .strip-view-expanded-container {
+      display: flex;
+    }
+    .strip-view-expanded-container {
+      display: none;
+      flex-direction: column;
+      gap: 1px;
+      grid-column: 1 / -1;
+      padding-left: 14px;
+      border-left: 2px solid rgba(120, 140, 180, 0.4);
+      margin-left: 12px;
+      margin-top: 2px;
+      margin-bottom: 4px;
+    }
+    .strip-view-substrip {
+      display: grid;
+      grid-template-columns: 50px 1fr;
+      gap: 4px;
+      align-items: stretch;
+    }
+    .strip-view-substrip-label {
+      font-size: 10px;
+      color: #99b;
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding-left: 4px;
+    }
+    .strip-view-substrip-label .ss-num { font-weight: bold; color: #cde; }
+    .strip-view-substrip-label .ss-deg { color: #889; }
+    .strip-view-substrip-label .strip-view-favorite-btn { margin-left: auto; }
+    .strip-view-substrip-canvas {
+      height: 20px;
+      background: rgba(20, 25, 35, 0.5);
+      border: 1px solid rgba(60, 80, 110, 0.25);
+      position: relative;
+      overflow: hidden;
+    }
+    .strip-view-substrip-canvas svg { display: block; width: 100%; height: 100%; }
     .strip-view-row-controls {
       display: flex;
       flex-direction: column;
@@ -265,58 +304,185 @@ function _stripComputeVarianceLevel(
   return 'green';
 }
 
-// Render the collapsed strip (mean across angles) for one step as an
-// SVG string. Each chip becomes one polyline; x = vug-height position
-// mapped to strip width; y = chip-normalized value mapped to strip
-// height (inverted — high values at top per design).
-function _stripRenderStepSVG(
-  ds: StripDataset, step: number, width: number, height: number
+// Sample a chip's normalized value (0..1) at one (step, angle, height).
+// If angle is null, returns the MEAN across all angles. Returns null
+// when the value is null/missing.
+function _stripSampleChipNormalized(
+  ds: StripDataset, step: number, angle: number | null, height: number, k: number
+): number | null {
+  const axes = ds.manifest.axes;
+  const chipCount = ds.manifest.chips.length;
+  if (angle !== null) {
+    const idx = stripDataIndex(step, angle, height, k, axes, chipCount);
+    if (idx < 0) return null;
+    const b = ds.chip_data[idx];
+    if (b === 255) return null;
+    return b / 254;
+  }
+  // mean across angles
+  let sum = 0, count = 0;
+  for (let a = 0; a < axes.angular_indices; a++) {
+    const idx = stripDataIndex(step, a, height, k, axes, chipCount);
+    if (idx < 0) continue;
+    const b = ds.chip_data[idx];
+    if (b === 255) continue;
+    sum += b; count++;
+  }
+  if (count === 0) return null;
+  return (sum / count) / 254;
+}
+
+// Line bundling helper. For each height position, sort the (chip, y)
+// pairs and group ones within `tolerance` of each other on the y axis.
+// Returns one polyline per chip but the same y value when chips bundle —
+// the rendering naturally draws them on top of each other. To make
+// bundled lines visually thicker, we adjust stroke-opacity proportional
+// to bundle size — when N chips bundle, each contributes 1/N to the
+// total but together they paint a more opaque line.
+//
+// Locked design (boss 2026-05-26): "they should overlap gracefully,
+// perhaps by just linking together to form a shared wider line where
+// neither line overlaps the other." The implementation here uses
+// y-snapping (chips within tolerance share the exact same y) so the
+// rendered polylines coincide pixel-for-pixel rather than fighting at
+// adjacent pixels — letting the eye read "bundle" vs. "diverge" cleanly.
+// _STRIP_BUNDLE_TOLERANCE is in normalized chip units (0..1). 0.02
+// means chips within 2% of each chip's range bundle together.
+const _STRIP_BUNDLE_TOLERANCE = 0.02;
+
+// Render a single strip (one row OR one angular sub-strip). When
+// `angle` is null, renders the mean across angles (collapsed view).
+// When `angle` is a specific index, renders that one angular slice.
+function _stripRenderStripSVG(
+  ds: StripDataset, step: number, angle: number | null, width: number, height: number
 ): string {
   const axes = ds.manifest.axes;
   const chipCount = ds.manifest.chips.length;
   const segs: string[] = [];
   segs.push(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${width} ${height}" preserveAspectRatio="none">`);
 
+  // First pass: gather all (chip, height) -> normalized values into a
+  // matrix so we can bundle per-height.
+  // valuesByHeight[h] = array of { k, norm } for visible chips.
+  const valuesByHeight: { k: number, norm: number }[][] = [];
+  for (let h = 0; h < axes.height_positions; h++) valuesByHeight.push([]);
+  for (let k = 0; k < chipCount; k++) {
+    const meta = ds.manifest.chips[k];
+    if (_stripVisibleChips[meta.id] === false) continue;
+    for (let h = 0; h < axes.height_positions; h++) {
+      const norm = _stripSampleChipNormalized(ds, step, angle, h, k);
+      if (norm === null) continue;
+      valuesByHeight[h].push({ k, norm });
+    }
+  }
+
+  // Second pass: y-snap. For each height, sort by norm, then snap chips
+  // that fall within tolerance to the bundle's centroid. Track bundle
+  // size per (h, k) so the polyline can render thicker where bundled.
+  // snapped[k][h] = { y, bundleSize } | undefined
+  const snapped: ({ y: number, bundleSize: number } | undefined)[][] = [];
+  for (let k = 0; k < chipCount; k++) snapped.push(new Array(axes.height_positions));
+  for (let h = 0; h < axes.height_positions; h++) {
+    const arr = valuesByHeight[h];
+    arr.sort((a, b) => a.norm - b.norm);
+    let i = 0;
+    while (i < arr.length) {
+      let j = i + 1;
+      let sum = arr[i].norm;
+      while (j < arr.length && (arr[j].norm - arr[i].norm) <= _STRIP_BUNDLE_TOLERANCE) {
+        sum += arr[j].norm;
+        j++;
+      }
+      const bundleSize = j - i;
+      const centroid = sum / bundleSize;
+      for (let q = i; q < j; q++) {
+        const y = height - centroid * height;
+        snapped[arr[q].k][h] = { y, bundleSize };
+      }
+      i = j;
+    }
+  }
+
+  // Third pass: emit one polyline per chip, with x = height position.
+  // Opacity scales with bundle size — solo lines render at 0.6 opacity;
+  // a bundle of N draws N stacked lines for cumulative opacity ~0.9 at
+  // N=4 (1 - 0.4^4).
   for (let k = 0; k < chipCount; k++) {
     const meta = ds.manifest.chips[k];
     if (_stripVisibleChips[meta.id] === false) continue;
     const colorHex = '#' + (meta.color | 0).toString(16).padStart(6, '0');
-    // Collect (x, y) points across height positions; y is the mean of
-    // angular bytes (skipping nulls).
     const pts: string[] = [];
     for (let h = 0; h < axes.height_positions; h++) {
-      let sum = 0, count = 0;
-      for (let a = 0; a < axes.angular_indices; a++) {
-        const idx = stripDataIndex(step, a, h, k, axes, chipCount);
-        if (idx < 0) continue;
-        const b = ds.chip_data[idx];
-        if (b === 255) continue;
-        sum += b; count++;
-      }
-      if (count === 0) continue;
-      const norm = (sum / count) / 254;
+      const s = snapped[k][h];
+      if (!s) continue;
       const x = (h / Math.max(1, axes.height_positions - 1)) * width;
-      const y = height - norm * height;
-      pts.push(`${x.toFixed(1)},${y.toFixed(1)}`);
+      pts.push(`${x.toFixed(1)},${s.y.toFixed(2)}`);
     }
     if (pts.length > 1) {
-      segs.push(`<polyline points="${pts.join(' ')}" fill="none" stroke="${colorHex}" stroke-width="1" stroke-opacity="0.7"/>`);
+      segs.push(`<polyline points="${pts.join(' ')}" fill="none" stroke="${colorHex}" stroke-width="1" stroke-opacity="0.6"/>`);
     }
   }
 
-  // Mineral nucleation markers — small filled circles at height position,
-  // mineral-colored. v1 uses a fixed pale-amber color since we don't
-  // have per-mineral colors handy in dataset-only context.
+  // Mineral nucleation markers. When `angle` is null (collapsed view),
+  // show every event whose step matches (OR across angles). When `angle`
+  // is specified, show only events at that exact angle.
   if (ds.nucleation_events && ds.nucleation_events.length) {
+    const cellsPerAngle = 120 / axes.angular_indices; // 5 native cells per 15° bin
     for (const ev of ds.nucleation_events) {
       if (ev.step !== step) continue;
+      if (angle !== null) {
+        // Filter to events whose native cell falls in this angular bin
+        const eventAngle = Math.floor(ev.cell / cellsPerAngle);
+        if (eventAngle !== angle) continue;
+      }
       const x = (ev.ring / Math.max(1, axes.height_positions - 1)) * width;
-      segs.push(`<circle cx="${x.toFixed(1)}" cy="${(height - 2).toFixed(1)}" r="2.4" fill="#fc6" stroke="#fff" stroke-width="0.5"><title>${ev.mineral}</title></circle>`);
+      segs.push(`<circle cx="${x.toFixed(1)}" cy="${(height - 2).toFixed(1)}" r="2.2" fill="#fc6" stroke="#fff" stroke-width="0.5"><title>${ev.mineral} @ step ${ev.step}, ring ${ev.ring}, cell ${ev.cell}</title></circle>`);
     }
   }
 
   segs.push('</svg>');
   return segs.join('');
+}
+
+// Convenience wrapper for the collapsed (mean) view.
+function _stripRenderStepSVG(
+  ds: StripDataset, step: number, width: number, height: number
+): string {
+  return _stripRenderStripSVG(ds, step, null, width, height);
+}
+
+// Compute the angle label "n / deg°" per locked design (n = 1..24,
+// deg = 0..345 in 15° steps).
+function _stripAngleLabel(angle: number, angular_indices: number): string {
+  const n = angle + 1;
+  const deg = Math.round((angle / angular_indices) * 360);
+  return `${n} / ${deg}°`;
+}
+
+// Build the expanded sub-strip container for a given step. Called on
+// expand-arrow click.
+function _stripBuildExpandedContainer(ds: StripDataset, step: number, width: number): HTMLElement {
+  const axes = ds.manifest.axes;
+  const datasetKey = stripStorageKey(ds.manifest);
+  const favSet = (_stripFavorites[datasetKey] = _stripFavorites[datasetKey] || { time_slices: new Set(), sub_strips: new Set() });
+  const container = document.createElement('div');
+  container.className = 'strip-view-expanded-container';
+  for (let a = 0; a < axes.angular_indices; a++) {
+    const sub = document.createElement('div');
+    sub.className = 'strip-view-substrip';
+    const subKey = `${step}#${a}`;
+    const isFav = favSet.sub_strips.has(subKey);
+    sub.innerHTML = `
+      <div class="strip-view-substrip-label">
+        <span class="ss-num">${a + 1}</span>
+        <span class="ss-deg">/ ${Math.round((a / axes.angular_indices) * 360)}°</span>
+        <button class="strip-view-favorite-btn ${isFav ? 'is-on' : ''}" data-step="${step}" data-angle="${a}" title="Favorite ${_stripAngleLabel(a, axes.angular_indices)}">★</button>
+      </div>
+      <div class="strip-view-substrip-canvas">${_stripRenderStripSVG(ds, step, a, width, 20)}</div>
+    `;
+    container.appendChild(sub);
+  }
+  return container;
 }
 
 // Build / refresh the dataset list view.
@@ -440,6 +606,7 @@ function _stripRenderDataset(bodyEl: HTMLElement, ds: StripDataset): void {
   for (let step = 0; step < ds.manifest.axes.steps; step++) {
     const row = document.createElement('div');
     row.className = 'strip-view-row';
+    row.setAttribute('data-row-step', String(step));
     const variance = _stripComputeVarianceLevel(ds, step);
     const datasetKey = stripStorageKey(ds.manifest);
     const favSet = (_stripFavorites[datasetKey] = _stripFavorites[datasetKey] || { time_slices: new Set(), sub_strips: new Set() });
@@ -447,7 +614,7 @@ function _stripRenderDataset(bodyEl: HTMLElement, ds: StripDataset): void {
     row.innerHTML = `
       <div class="strip-view-row-controls">
         <span class="strip-view-variance-dot ${variance === 'green' ? '' : variance}" title="step ${step} — variance: ${variance}"></span>
-        <button class="strip-view-expand-btn" data-step="${step}" title="Expand to 24 angular sub-strips (v2)">▸</button>
+        <button class="strip-view-expand-btn" data-step="${step}" title="Expand to 24 angular sub-strips">▸</button>
         <button class="strip-view-favorite-btn ${isFav ? 'is-on' : ''}" data-step="${step}" title="Favorite step ${step}">★</button>
       </div>
       <div class="strip-view-row-canvas" data-step="${step}">${_stripRenderStepSVG(ds, step, stripW, stripH)}</div>
@@ -455,7 +622,7 @@ function _stripRenderDataset(bodyEl: HTMLElement, ds: StripDataset): void {
     film.appendChild(row);
   }
 
-  // Wire favorite buttons
+  // Wire favorite + expand buttons
   film.addEventListener('click', (ev) => {
     const target = ev.target as HTMLElement;
     if (target.classList.contains('strip-view-favorite-btn')) {
@@ -463,18 +630,52 @@ function _stripRenderDataset(bodyEl: HTMLElement, ds: StripDataset): void {
       if (!Number.isFinite(step)) return;
       const datasetKey = stripStorageKey(ds.manifest);
       const favSet = _stripFavorites[datasetKey];
-      if (favSet.time_slices.has(step)) {
-        favSet.time_slices.delete(step);
-        target.classList.remove('is-on');
+      const angleAttr = target.getAttribute('data-angle');
+      if (angleAttr !== null) {
+        // Sub-strip favorite — keyed by "step#angle"
+        const angle = Number(angleAttr);
+        const subKey = `${step}#${angle}`;
+        if (favSet.sub_strips.has(subKey)) {
+          favSet.sub_strips.delete(subKey);
+          target.classList.remove('is-on');
+        } else {
+          favSet.sub_strips.add(subKey);
+          target.classList.add('is-on');
+        }
       } else {
-        favSet.time_slices.add(step);
-        target.classList.add('is-on');
+        // Whole-step favorite
+        if (favSet.time_slices.has(step)) {
+          favSet.time_slices.delete(step);
+          target.classList.remove('is-on');
+        } else {
+          favSet.time_slices.add(step);
+          target.classList.add('is-on');
+        }
       }
+      ev.stopPropagation();
+      return;
     }
     if (target.classList.contains('strip-view-expand-btn')) {
-      // v1: no-op with friendly note. v2 will expand the row.
-      const step = target.getAttribute('data-step');
-      target.title = 'Expansion to 24 angular sub-strips ships in v2; step ' + step + ' has data ready.';
+      const step = Number(target.getAttribute('data-step'));
+      if (!Number.isFinite(step)) return;
+      const row = target.closest('.strip-view-row') as HTMLElement;
+      if (!row) return;
+      const existing = row.querySelector('.strip-view-expanded-container');
+      if (existing) {
+        // Collapse
+        existing.remove();
+        row.classList.remove('is-expanded');
+        target.textContent = '▸';
+        target.setAttribute('title', 'Expand to 24 angular sub-strips');
+      } else {
+        // Expand
+        const container = _stripBuildExpandedContainer(ds, step, stripW);
+        row.appendChild(container);
+        row.classList.add('is-expanded');
+        target.textContent = '▾';
+        target.setAttribute('title', 'Collapse');
+      }
+      ev.stopPropagation();
     }
   });
 
@@ -540,25 +741,19 @@ function initStripView(): void {
       else _stripRenderDatasetList(body);
     });
   }
-  // Create the toolbar toggle button. Inserts near the helicoid toggle
-  // if one exists, or as a free-floating top-right button as fallback.
-  let toggle = document.getElementById('strip-view-toggle');
-  if (!toggle) {
-    toggle = document.createElement('button');
-    toggle.id = 'strip-view-toggle';
-    toggle.textContent = '📼 Strip View';
-    toggle.title = 'Strip View — helicoid recordings paragenesis viewer';
-    toggle.style.cssText = 'position:fixed; top:8px; right:160px; z-index:1400; background:rgba(40,60,90,0.9); border:1px solid rgba(120,140,180,0.5); color:#cde; padding:4px 10px; cursor:pointer; font-family:Consolas,monospace; font-size:11px; border-radius:3px;';
-    toggle.addEventListener('click', () => {
-      panel!.classList.toggle('is-hidden');
-      if (!panel!.classList.contains('is-hidden')) {
-        const body = panel!.querySelector('#strip-view-body') as HTMLElement;
-        if (_stripActiveDataset) _stripRenderDataset(body, _stripActiveDataset);
-        else _stripRenderDatasetList(body);
-      }
-    });
-    document.body.appendChild(toggle);
-  }
+  // Expose toggle for the tab-bar button (#mode-stripview in
+  // index.html invokes window.toggleStripView in its onclick handler).
+  // The button itself lives in the mode-toggle bar (between Record
+  // Player and Library) per boss feedback 2026-05-26. No floating
+  // button created here — the bar handles it.
+  (window as any).toggleStripView = () => {
+    panel!.classList.toggle('is-hidden');
+    if (!panel!.classList.contains('is-hidden')) {
+      const body = panel!.querySelector('#strip-view-body') as HTMLElement;
+      if (_stripActiveDataset) _stripRenderDataset(body, _stripActiveDataset);
+      else _stripRenderDatasetList(body);
+    }
+  };
 }
 
 // Auto-init on DOM ready when running in the browser. Tests + harness

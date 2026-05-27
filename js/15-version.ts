@@ -8417,5 +8417,125 @@
 //   tests-js/setup.ts: 8 new EXPORTS entries
 //   tests-js/strip-view-bedrock.test.ts (14 new tests)
 //   tests-js/baselines/seed42_v149.json: regenerated baseline (byte-identical to v148)
-const SIM_VERSION = 149;
+//
+// ============================================================
+//   v150 — Strip View v2: tab-bar + expansion + bundling (2026-05-26)
+// ============================================================
+//
+// Second strip view commit; addresses two boss-reported gaps from v149
+// playtest + lands the three biggest v2 features.
+//
+// REPORTED GAPS (v149 playtest)
+//
+//   1. "Even after growing the vugg in simulation it's not visible."
+//      v149 only wired auto-capture in Random mode (96-ui-random.ts);
+//      Simulation mode (91-ui-legends.ts — the "Grow" button) was
+//      uninstrumented. Most users use Simulation mode, so the recorder
+//      effectively never fired for them.
+//
+//      FIX: same recorder lifecycle pattern added to 91-ui-legends.ts.
+//      Attach at sim creation, finalize + save to IndexedDB right after
+//      the sim loop completes (before the format_summary epilogue).
+//
+//   2. "Strip View button should be just to the right of Record Player."
+//      v149 created a free-floating button at top:8px right:160px,
+//      which overlapped the helicoid toggle.
+//
+//      FIX: Added <button id="mode-stripview"> to the existing
+//      .mode-toggle bar in index.html, positioned between Record Player
+//      and Library. Removed the floating button from 99k-strip-view.ts.
+//      Toggle is now exposed via window.toggleStripView() so the bar
+//      button's onclick handler can invoke it.
+//
+// V2 FEATURES SHIPPED
+//
+//   3. Angular expansion (24 sub-strips). Click the ▸ arrow on any
+//      collapsed time strip to expand into 24 vertically-stacked angular
+//      sub-strips, one per 15° of rotation. Each sub-strip:
+//        - Labeled "n / deg°" per locked design (e.g. "1 / 0°", "7 / 90°")
+//        - Has its own star button on the LEFT for favoriting that
+//          specific (step, angle) sub-strip — separate favorites Set
+//          from whole-time-slice favorites per locked design
+//        - Renders chip values from THIS angle only (not the mean)
+//        - Shows only nucleation events that fell in this 15° bin
+//      Click the arrow (now ▾) again to collapse. Vertical-stack
+//      preserves screen-width resolution per sub-strip.
+//
+//   4. Line bundling. When two or more chips would render at
+//      essentially the same y value (within 2% of normalized range),
+//      they snap to a shared centroid y so the polylines coincide
+//      pixel-for-pixel instead of fighting at adjacent pixels.
+//      Implementation: per-height sort by normalized value, group
+//      consecutive entries within tolerance, snap to bundle centroid.
+//      Result: quiet chips collapse into a baseline ribbon; chips
+//      doing geological work this step diverge out and stand out.
+//      Per locked design: "they should overlap gracefully, perhaps by
+//      just linking together to form a shared wider line where neither
+//      line overlaps the other."
+//
+//   5. Per-angle mineral nucleation filtering. v149 rendered every
+//      nucleation event in every view. v150 filters: in collapsed view
+//      show events whose step matches (OR across angles); in expanded
+//      sub-strip show only events whose native cell falls within that
+//      angular bin (cell ∈ [a*5, (a+1)*5) for 24-sub-strip mode).
+//      Tooltip now shows mineral name + step + ring + cell for
+//      diagnostic readability.
+//
+// STILL DEFERRED TO V3+ (data model supports, UI not built):
+//   - Cross-sub-strip cursor on hover (vertical guide line across all
+//     expanded sub-strips at the same height position)
+//   - Download dataset as gzipped .stripview file (stripSerialize built;
+//     needs export button)
+//   - Upload + load dataset from file
+//   - Favorite-based filters / comparison views / export-favorites-only
+//   - Auto-capture wiring in Fortress (94-ui-menu.ts), Zen (98a-ui-zen.ts),
+//     Agent API (99z-agent-interface.ts) — minor, low priority
+//   - Per-vertex spatial chemistry expansion (deeper architectural arc;
+//     the load-bearing prerequisite for the strip view to show real
+//     angular variation in non-wall chips)
+//
+// BASELINE INVARIANCE
+//
+// The Simulation mode hook (91-ui-legends.ts) is conditional on
+// StripRecorder being defined + attaches a recorder to sim. The
+// existing run_step hook then calls captureStep. None of this affects
+// sim state — recorder reads sim, doesn't write. Calibration tests
+// don't use legends mode (they call run_step directly), so baseline
+// stays byte-identical. seed42_v150.json is byte-identical to
+// seed42_v149.json (and v148).
+//
+// TESTS
+//
+//   Pre-v150:  1562 tests pass (v149)
+//   Post-v150: 1562 tests pass (no new tests this commit — the v149
+//              suite covers the dataset format and recorder; the v2
+//              additions are UI render code that's better validated
+//              visually in the browser)
+//
+// SETTINGS FLIPPED
+//   js/91-ui-legends.ts: attach recorder at sim creation + finalize +
+//     save at end of sim loop (mirrors 96-ui-random.ts pattern)
+//   index.html: added <button id="mode-stripview"> in .mode-toggle
+//     between Record Player and Library; floating button removed
+//   js/99k-strip-view.ts:
+//     - Removed floating button creation; expose window.toggleStripView
+//     - Added _stripRenderStripSVG (unified collapsed + per-angle path)
+//     - Added _stripSampleChipNormalized helper for angle/null sampling
+//     - Added line bundling (y-snap within tolerance) in render path
+//     - Added _stripBuildExpandedContainer for 24 sub-strip stack
+//     - Wired expand-arrow click to toggle expansion in place
+//     - Wired sub-strip favorite buttons (separate Set from
+//       time_slices favorites)
+//     - Per-angle nucleation marker filtering
+//     - CSS for .strip-view-row.is-expanded, .strip-view-substrip,
+//       .strip-view-substrip-label, .strip-view-substrip-canvas
+//
+// WHAT v150 SHIPS
+//   js/15-version.ts: this block + SIM_VERSION 149 → 150
+//   js/91-ui-legends.ts: Simulation mode recorder wiring
+//   js/99k-strip-view.ts: expansion + bundling + per-angle filtering
+//   index.html: tab-bar Strip View button
+//   tests-js/baselines/seed42_v150.json: regenerated baseline (byte-
+//     identical to v149)
+const SIM_VERSION = 150;
 
