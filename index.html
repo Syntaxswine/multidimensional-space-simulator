@@ -2931,10 +2931,11 @@ footer a:hover {
   <button id="mode-groove" onclick="switchMode('groove')">📀 Record Player</button>
   <!-- HELIX-OVERLAY-FORK ADDITION (strip view v149+) — Shy's
        paragenesis viewer; positioned to the right of Record Player
-       per boss feedback 2026-05-26. Toggle opens the overlay panel;
-       click again to close. The handler is wired by 99k-strip-view.ts
-       at DOMContentLoaded. -->
-  <button id="mode-stripview" onclick="window.toggleStripView && window.toggleStripView()">📼 Strip View</button>
+       per boss feedback 2026-05-26. v153 (2026-05-26): promoted from
+       overlay panel to its own mode (like Record Player) per boss
+       feedback. Routes through switchMode so currentGameMode + topo
+       lifecycle work the same as the other modes. -->
+  <button id="mode-stripview" onclick="switchMode('stripview')">📼 Strip View</button>
   <!-- END HELIX-OVERLAY-FORK ADDITION -->
   <button id="mode-library" onclick="switchMode('library')">📚 Library</button>
   <button id="mode-home" class="mode-home-btn" onclick="showTitleScreen()">🏠 Home</button>
@@ -3680,6 +3681,13 @@ Scenarios:
 </div>
 
 <!-- Record Groove Panel -->
+<!-- HELIX-OVERLAY-FORK ADDITION (strip view v153+, 2026-05-26) —
+     mode panel for the Strip View tab. Promoted from overlay popup
+     per boss feedback ("should be a separate window, like how record
+     player mode works"). 99k-strip-view.ts fills this on mode entry. -->
+<div id="strip-view-mode-panel" class="strip-view-mode-panel" style="display:none"></div>
+<!-- END HELIX-OVERLAY-FORK ADDITION -->
+
 <div id="groove-panel">
   <div class="groove-crystal-info" id="groove-crystal-info" style="display:none"></div>
   <div class="groove-container">
@@ -13356,7 +13364,74 @@ let timeScale = 5.0;
 //   js/15-version.ts: this block + SIM_VERSION 151 → 152
 //   js/99k-strip-view.ts: 72 → 100 height + 1.5 → 1.25 stroke
 //   tests-js/baselines/seed42_v152.json: regenerated baseline
-const SIM_VERSION = 152;
+//
+// ============================================================
+//   v153 — Strip View as a proper mode panel (2026-05-26)
+// ============================================================
+//
+// Boss feedback v152 → v153: "rather than a pop up the strip mode
+// should be a separate window, like how record player mode works".
+// v149-v152 implemented the strip view as a floating overlay popped
+// open by a toggle button. Boss wants it to behave like Record Player
+// (groove) — its own full-page mode tab in the mode-toggle bar that
+// switches the page view.
+//
+// CHANGES
+//
+//   1. index.html: new <div id="strip-view-mode-panel"> container in
+//      the page flow (placed alongside groove-panel). 99k-strip-view
+//      populates it on mode entry.
+//
+//   2. index.html: tab-bar button onclick changed from
+//      `window.toggleStripView()` (overlay toggle) to
+//      `switchMode('stripview')` (proper mode switch).
+//
+//   3. js/94-ui-menu.ts hideAllMenuAndModePanels: added
+//      'strip-view-mode-panel' to the hidden-ids list. Switching to any
+//      other mode now correctly hides the strip view.
+//
+//   4. js/94-ui-menu.ts switchMode: added mode === 'stripview' branch.
+//      Shows the panel, marks #mode-stripview .active (matching the
+//      Record Player / Library pattern), and invokes
+//      window.stripViewModeShow() to populate.
+//
+//   5. js/99k-strip-view.ts:
+//      - .strip-view-mode-panel CSS replaces the old .strip-view-panel
+//        floating styles. In-flow layout, centered with margin:auto,
+//        max-width 1600px, min-height 600px, max-height calc(100vh-80px).
+//      - Removed close button (mode panels close by switching to another
+//        mode, just like Record Player).
+//      - Removed the overlay panel creation and window.toggleStripView.
+//      - initStripView now ensures styles + exposes
+//        window.stripViewModeShow(), which lazily populates the
+//        mode-panel container on first show + refreshes the dataset
+//        list on every show.
+//      - Strip width bumped from 860 → 1500 to fill the wider mode
+//        panel (was sized for the 920 px popup).
+//
+// V2 FEATURE LIST UNCHANGED
+//
+// All v2 features ship the same way (line bundling, 24-sub-strip
+// expansion, variance dot, favorites, mineral nucleation markers,
+// jump-to-top/bottom buttons, chip-system selector). Only the
+// containment / lifecycle changed.
+//
+// BASELINE
+//
+// CSS + UI lifecycle only. Sim state unchanged. seed42_v153.json
+// byte-identical to v152.
+//
+// TESTS
+//
+// 1562/1562 pass.
+//
+// WHAT v153 SHIPS
+//   js/15-version.ts: this block + SIM_VERSION 152 → 153
+//   js/94-ui-menu.ts: switchMode('stripview') + hide-panels wiring
+//   js/99k-strip-view.ts: mode-panel layout + stripViewModeShow exposure
+//   index.html: new mode-panel container + tab-button rewired
+//   tests-js/baselines/seed42_v153.json: regenerated baseline
+const SIM_VERSION = 153;
 
 // ── 18-constants.js ──
 
@@ -50602,6 +50677,8 @@ function hideAllMenuAndModePanels() {
         'fortress-panel', 'groove-panel', 'idle-panel',
         'library-panel', 'random-panel',
         'topo-panel',
+        // HELIX-OVERLAY-FORK ADDITION (v153): strip view mode panel.
+        'strip-view-mode-panel',
     ];
     for (const id of ids) {
         const el = document.getElementById(id);
@@ -50834,6 +50911,9 @@ function switchMode(mode) {
     const modeCurrent = document.getElementById('mode-current');
     const modeGroove = document.getElementById('mode-groove');
     const modeLibrary = document.getElementById('mode-library');
+    // HELIX-OVERLAY-FORK ADDITION (v153): strip view as a proper mode.
+    const modeStripView = document.getElementById('mode-stripview');
+    const stripViewModePanel = document.getElementById('strip-view-mode-panel');
     // Pause background activity before leaving it.
     if (mode !== 'idle' && idleRunning && !idlePaused && typeof idleTogglePause === 'function') {
         idleTogglePause();
@@ -50890,6 +50970,10 @@ function switchMode(mode) {
         modeGroove.classList.remove('active');
     if (modeLibrary)
         modeLibrary.classList.remove('active');
+    if (modeStripView)
+        modeStripView.classList.remove('active');
+    if (stripViewModePanel)
+        stripViewModePanel.style.display = 'none';
     if (mode === 'legends') {
         legendsControls.style.display = 'flex';
         outputContainer.style.display = 'block';
@@ -50924,6 +51008,19 @@ function switchMode(mode) {
         if (rp)
             rp.style.display = 'block';
         timeScale = 5.0;
+    }
+    else if (mode === 'stripview') {
+        // HELIX-OVERLAY-FORK ADDITION (v153): Strip View mode. Mirrors
+        // Record Player ('groove') — own full-page panel that's loaded
+        // post-hoc. Doesn't bind to a sim; just paints the dataset list
+        // and lets the user pick one to view.
+        if (stripViewModePanel)
+            stripViewModePanel.style.display = 'block';
+        if (modeStripView)
+            modeStripView.classList.add('active');
+        if (typeof window.stripViewModeShow === 'function') {
+            window.stripViewModeShow();
+        }
     }
     // Remember the active game so the Current Game nav button can
     // return the player here from Record Player / Library.
@@ -64987,26 +65084,27 @@ function _ensureStripViewStyles() {
     const style = document.createElement('style');
     style.id = 'strip-view-styles';
     style.textContent = `
-    .strip-view-panel {
-      position: fixed;
-      top: 50px;
-      right: 20px;
-      width: 920px;
-      max-width: calc(100vw - 60px);
-      max-height: calc(100vh - 80px);
+    /* v153 (2026-05-26): promoted from floating overlay to full mode
+       panel per boss feedback ("should be a separate window, like how
+       record player mode works"). #strip-view-mode-panel is the HTML
+       container; we render the header + body inside it. */
+    .strip-view-mode-panel {
+      width: calc(100vw - 32px);
+      max-width: 1600px;
+      margin: 16px auto;
       background: rgba(8, 10, 14, 0.96);
       border: 1px solid rgba(140, 160, 200, 0.35);
       border-radius: 6px;
       color: #cde;
       font-family: 'Consolas', monospace;
       font-size: 11px;
-      z-index: 1500;
       box-shadow: 0 6px 32px rgba(0,0,0,0.6);
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      min-height: 600px;
+      max-height: calc(100vh - 80px);
     }
-    .strip-view-panel.is-hidden { display: none; }
     .strip-view-header {
       padding: 8px 12px;
       border-bottom: 1px solid rgba(140, 160, 200, 0.25);
@@ -65416,7 +65514,7 @@ function _stripBuildExpandedContainer(ds, step, width) {
         <span class="ss-deg">/ ${Math.round((a / axes.angular_indices) * 360)}°</span>
         <button class="strip-view-favorite-btn ${isFav ? 'is-on' : ''}" data-step="${step}" data-angle="${a}" title="Favorite ${_stripAngleLabel(a, axes.angular_indices)}">★</button>
       </div>
-      <div class="strip-view-substrip-canvas">${_stripRenderStripSVG(ds, step, a, width, 100)}</div>
+      <div class="strip-view-substrip-canvas">${_stripRenderStripSVG(ds, step, a, 1500, 100)}</div>
     `;
         container.appendChild(sub);
     }
@@ -65540,7 +65638,11 @@ function _stripRenderDataset(bodyEl, ds) {
     film.id = 'strip-view-filmstrip';
     bodyEl.appendChild(film);
     // Pre-build all rows (older-at-bottom via column-reverse on .filmstrip)
-    const stripW = 860;
+    // v153 (2026-05-26): widened from 860 to 1500 to fill mode-panel
+    // real estate (was 920 popup width, now full-page). SVG scales to
+    // container so this is mostly a viewBox tweak — but bumping the
+    // logical width gives finer point spacing for taller scenarios.
+    const stripW = 1500;
     // v152 (2026-05-26): 72 → 100 per second boss tune. Must match
     // .strip-view-row-canvas CSS height to avoid SVG aspect-ratio stretch.
     const stripH = 100;
@@ -65649,7 +65751,7 @@ function _stripRefreshFilmstrip(bodyEl, ds) {
     canvases.forEach(c => {
         const step = Number(c.getAttribute('data-step'));
         if (Number.isFinite(step)) {
-            c.innerHTML = _stripRenderStepSVG(ds, step, 860, 24);
+            c.innerHTML = _stripRenderStepSVG(ds, step, 1500, 100);
         }
     });
 }
@@ -65658,49 +65760,42 @@ function _stripRefreshFilmstrip(bodyEl, ds) {
 // ============================================================
 function initStripView() {
     _ensureStripViewStyles();
-    // Create the panel if it doesn't exist yet.
-    let panel = document.getElementById('strip-view-panel');
-    if (!panel) {
-        panel = document.createElement('div');
-        panel.id = 'strip-view-panel';
-        panel.className = 'strip-view-panel is-hidden';
-        panel.innerHTML = `
-      <div class="strip-view-header">
-        <span class="strip-view-title">Strip View</span>
-        <span class="strip-view-sub">helicoid recordings — paragenesis viewer</span>
-        <div class="strip-view-header-actions">
-          <button class="strip-view-btn" id="strip-view-refresh">Refresh</button>
-          <button class="strip-view-btn" id="strip-view-close">✕</button>
+    // v153 (2026-05-26): promoted from overlay to mode panel. The
+    // container div #strip-view-mode-panel lives in index.html;
+    // switchMode('stripview') makes it visible and calls
+    // window.stripViewModeShow(), which populates the header + body
+    // skeleton (one-time) and refreshes the dataset list (every time).
+    // Re-rendering the skeleton is idempotent; we only build it once.
+    window.stripViewModeShow = () => {
+        const panel = document.getElementById('strip-view-mode-panel');
+        if (!panel)
+            return;
+        // First-time scaffold inside the mode panel
+        if (!panel.querySelector('#strip-view-body')) {
+            panel.innerHTML = `
+        <div class="strip-view-header">
+          <span class="strip-view-title">Strip View</span>
+          <span class="strip-view-sub">helicoid recordings — paragenesis viewer</span>
+          <div class="strip-view-header-actions">
+            <button class="strip-view-btn" id="strip-view-refresh">Refresh</button>
+          </div>
         </div>
-      </div>
-      <div class="strip-view-body" id="strip-view-body"></div>
-    `;
-        document.body.appendChild(panel);
-        const closeBtn = panel.querySelector('#strip-view-close');
-        const refreshBtn = panel.querySelector('#strip-view-refresh');
-        closeBtn.addEventListener('click', () => panel.classList.add('is-hidden'));
-        refreshBtn.addEventListener('click', () => {
-            const body = panel.querySelector('#strip-view-body');
-            if (_stripActiveDataset)
-                _stripRenderDataset(body, _stripActiveDataset);
-            else
-                _stripRenderDatasetList(body);
-        });
-    }
-    // Expose toggle for the tab-bar button (#mode-stripview in
-    // index.html invokes window.toggleStripView in its onclick handler).
-    // The button itself lives in the mode-toggle bar (between Record
-    // Player and Library) per boss feedback 2026-05-26. No floating
-    // button created here — the bar handles it.
-    window.toggleStripView = () => {
-        panel.classList.toggle('is-hidden');
-        if (!panel.classList.contains('is-hidden')) {
-            const body = panel.querySelector('#strip-view-body');
-            if (_stripActiveDataset)
-                _stripRenderDataset(body, _stripActiveDataset);
-            else
-                _stripRenderDatasetList(body);
+        <div class="strip-view-body" id="strip-view-body"></div>
+      `;
+            const refreshBtn = panel.querySelector('#strip-view-refresh');
+            refreshBtn.addEventListener('click', () => {
+                const body = panel.querySelector('#strip-view-body');
+                if (_stripActiveDataset)
+                    _stripRenderDataset(body, _stripActiveDataset);
+                else
+                    _stripRenderDatasetList(body);
+            });
         }
+        const body = panel.querySelector('#strip-view-body');
+        if (_stripActiveDataset)
+            _stripRenderDataset(body, _stripActiveDataset);
+        else
+            _stripRenderDatasetList(body);
     };
 }
 // Auto-init on DOM ready when running in the browser. Tests + harness

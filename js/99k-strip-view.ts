@@ -60,26 +60,27 @@ function _ensureStripViewStyles(): void {
   const style = document.createElement('style');
   style.id = 'strip-view-styles';
   style.textContent = `
-    .strip-view-panel {
-      position: fixed;
-      top: 50px;
-      right: 20px;
-      width: 920px;
-      max-width: calc(100vw - 60px);
-      max-height: calc(100vh - 80px);
+    /* v153 (2026-05-26): promoted from floating overlay to full mode
+       panel per boss feedback ("should be a separate window, like how
+       record player mode works"). #strip-view-mode-panel is the HTML
+       container; we render the header + body inside it. */
+    .strip-view-mode-panel {
+      width: calc(100vw - 32px);
+      max-width: 1600px;
+      margin: 16px auto;
       background: rgba(8, 10, 14, 0.96);
       border: 1px solid rgba(140, 160, 200, 0.35);
       border-radius: 6px;
       color: #cde;
       font-family: 'Consolas', monospace;
       font-size: 11px;
-      z-index: 1500;
       box-shadow: 0 6px 32px rgba(0,0,0,0.6);
       display: flex;
       flex-direction: column;
       overflow: hidden;
+      min-height: 600px;
+      max-height: calc(100vh - 80px);
     }
-    .strip-view-panel.is-hidden { display: none; }
     .strip-view-header {
       padding: 8px 12px;
       border-bottom: 1px solid rgba(140, 160, 200, 0.25);
@@ -489,7 +490,7 @@ function _stripBuildExpandedContainer(ds: StripDataset, step: number, width: num
         <span class="ss-deg">/ ${Math.round((a / axes.angular_indices) * 360)}°</span>
         <button class="strip-view-favorite-btn ${isFav ? 'is-on' : ''}" data-step="${step}" data-angle="${a}" title="Favorite ${_stripAngleLabel(a, axes.angular_indices)}">★</button>
       </div>
-      <div class="strip-view-substrip-canvas">${_stripRenderStripSVG(ds, step, a, width, 100)}</div>
+      <div class="strip-view-substrip-canvas">${_stripRenderStripSVG(ds, step, a, 1500, 100)}</div>
     `;
     container.appendChild(sub);
   }
@@ -612,7 +613,11 @@ function _stripRenderDataset(bodyEl: HTMLElement, ds: StripDataset): void {
   bodyEl.appendChild(film);
 
   // Pre-build all rows (older-at-bottom via column-reverse on .filmstrip)
-  const stripW = 860;
+  // v153 (2026-05-26): widened from 860 to 1500 to fill mode-panel
+  // real estate (was 920 popup width, now full-page). SVG scales to
+  // container so this is mostly a viewBox tweak — but bumping the
+  // logical width gives finer point spacing for taller scenarios.
+  const stripW = 1500;
   // v152 (2026-05-26): 72 → 100 per second boss tune. Must match
   // .strip-view-row-canvas CSS height to avoid SVG aspect-ratio stretch.
   const stripH = 100;
@@ -716,7 +721,7 @@ function _stripRefreshFilmstrip(bodyEl: HTMLElement, ds: StripDataset): void {
   canvases.forEach(c => {
     const step = Number(c.getAttribute('data-step'));
     if (Number.isFinite(step)) {
-      c.innerHTML = _stripRenderStepSVG(ds, step, 860, 24);
+      c.innerHTML = _stripRenderStepSVG(ds, step, 1500, 100);
     }
   });
 }
@@ -727,45 +732,37 @@ function _stripRefreshFilmstrip(bodyEl: HTMLElement, ds: StripDataset): void {
 
 function initStripView(): void {
   _ensureStripViewStyles();
-  // Create the panel if it doesn't exist yet.
-  let panel = document.getElementById('strip-view-panel') as HTMLDivElement | null;
-  if (!panel) {
-    panel = document.createElement('div');
-    panel.id = 'strip-view-panel';
-    panel.className = 'strip-view-panel is-hidden';
-    panel.innerHTML = `
-      <div class="strip-view-header">
-        <span class="strip-view-title">Strip View</span>
-        <span class="strip-view-sub">helicoid recordings — paragenesis viewer</span>
-        <div class="strip-view-header-actions">
-          <button class="strip-view-btn" id="strip-view-refresh">Refresh</button>
-          <button class="strip-view-btn" id="strip-view-close">✕</button>
+  // v153 (2026-05-26): promoted from overlay to mode panel. The
+  // container div #strip-view-mode-panel lives in index.html;
+  // switchMode('stripview') makes it visible and calls
+  // window.stripViewModeShow(), which populates the header + body
+  // skeleton (one-time) and refreshes the dataset list (every time).
+  // Re-rendering the skeleton is idempotent; we only build it once.
+  (window as any).stripViewModeShow = () => {
+    const panel = document.getElementById('strip-view-mode-panel');
+    if (!panel) return;
+    // First-time scaffold inside the mode panel
+    if (!panel.querySelector('#strip-view-body')) {
+      panel.innerHTML = `
+        <div class="strip-view-header">
+          <span class="strip-view-title">Strip View</span>
+          <span class="strip-view-sub">helicoid recordings — paragenesis viewer</span>
+          <div class="strip-view-header-actions">
+            <button class="strip-view-btn" id="strip-view-refresh">Refresh</button>
+          </div>
         </div>
-      </div>
-      <div class="strip-view-body" id="strip-view-body"></div>
-    `;
-    document.body.appendChild(panel);
-    const closeBtn = panel.querySelector('#strip-view-close') as HTMLButtonElement;
-    const refreshBtn = panel.querySelector('#strip-view-refresh') as HTMLButtonElement;
-    closeBtn.addEventListener('click', () => panel!.classList.add('is-hidden'));
-    refreshBtn.addEventListener('click', () => {
-      const body = panel!.querySelector('#strip-view-body') as HTMLElement;
-      if (_stripActiveDataset) _stripRenderDataset(body, _stripActiveDataset);
-      else _stripRenderDatasetList(body);
-    });
-  }
-  // Expose toggle for the tab-bar button (#mode-stripview in
-  // index.html invokes window.toggleStripView in its onclick handler).
-  // The button itself lives in the mode-toggle bar (between Record
-  // Player and Library) per boss feedback 2026-05-26. No floating
-  // button created here — the bar handles it.
-  (window as any).toggleStripView = () => {
-    panel!.classList.toggle('is-hidden');
-    if (!panel!.classList.contains('is-hidden')) {
-      const body = panel!.querySelector('#strip-view-body') as HTMLElement;
-      if (_stripActiveDataset) _stripRenderDataset(body, _stripActiveDataset);
-      else _stripRenderDatasetList(body);
+        <div class="strip-view-body" id="strip-view-body"></div>
+      `;
+      const refreshBtn = panel.querySelector('#strip-view-refresh') as HTMLButtonElement;
+      refreshBtn.addEventListener('click', () => {
+        const body = panel.querySelector('#strip-view-body') as HTMLElement;
+        if (_stripActiveDataset) _stripRenderDataset(body, _stripActiveDataset);
+        else _stripRenderDatasetList(body);
+      });
     }
+    const body = panel.querySelector('#strip-view-body') as HTMLElement;
+    if (_stripActiveDataset) _stripRenderDataset(body, _stripActiveDataset);
+    else _stripRenderDatasetList(body);
   };
 }
 

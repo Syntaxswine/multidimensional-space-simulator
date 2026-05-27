@@ -8606,5 +8606,72 @@
 //   js/15-version.ts: this block + SIM_VERSION 151 → 152
 //   js/99k-strip-view.ts: 72 → 100 height + 1.5 → 1.25 stroke
 //   tests-js/baselines/seed42_v152.json: regenerated baseline
-const SIM_VERSION = 152;
+//
+// ============================================================
+//   v153 — Strip View as a proper mode panel (2026-05-26)
+// ============================================================
+//
+// Boss feedback v152 → v153: "rather than a pop up the strip mode
+// should be a separate window, like how record player mode works".
+// v149-v152 implemented the strip view as a floating overlay popped
+// open by a toggle button. Boss wants it to behave like Record Player
+// (groove) — its own full-page mode tab in the mode-toggle bar that
+// switches the page view.
+//
+// CHANGES
+//
+//   1. index.html: new <div id="strip-view-mode-panel"> container in
+//      the page flow (placed alongside groove-panel). 99k-strip-view
+//      populates it on mode entry.
+//
+//   2. index.html: tab-bar button onclick changed from
+//      `window.toggleStripView()` (overlay toggle) to
+//      `switchMode('stripview')` (proper mode switch).
+//
+//   3. js/94-ui-menu.ts hideAllMenuAndModePanels: added
+//      'strip-view-mode-panel' to the hidden-ids list. Switching to any
+//      other mode now correctly hides the strip view.
+//
+//   4. js/94-ui-menu.ts switchMode: added mode === 'stripview' branch.
+//      Shows the panel, marks #mode-stripview .active (matching the
+//      Record Player / Library pattern), and invokes
+//      window.stripViewModeShow() to populate.
+//
+//   5. js/99k-strip-view.ts:
+//      - .strip-view-mode-panel CSS replaces the old .strip-view-panel
+//        floating styles. In-flow layout, centered with margin:auto,
+//        max-width 1600px, min-height 600px, max-height calc(100vh-80px).
+//      - Removed close button (mode panels close by switching to another
+//        mode, just like Record Player).
+//      - Removed the overlay panel creation and window.toggleStripView.
+//      - initStripView now ensures styles + exposes
+//        window.stripViewModeShow(), which lazily populates the
+//        mode-panel container on first show + refreshes the dataset
+//        list on every show.
+//      - Strip width bumped from 860 → 1500 to fill the wider mode
+//        panel (was sized for the 920 px popup).
+//
+// V2 FEATURE LIST UNCHANGED
+//
+// All v2 features ship the same way (line bundling, 24-sub-strip
+// expansion, variance dot, favorites, mineral nucleation markers,
+// jump-to-top/bottom buttons, chip-system selector). Only the
+// containment / lifecycle changed.
+//
+// BASELINE
+//
+// CSS + UI lifecycle only. Sim state unchanged. seed42_v153.json
+// byte-identical to v152.
+//
+// TESTS
+//
+// 1562/1562 pass.
+//
+// WHAT v153 SHIPS
+//   js/15-version.ts: this block + SIM_VERSION 152 → 153
+//   js/94-ui-menu.ts: switchMode('stripview') + hide-panels wiring
+//   js/99k-strip-view.ts: mode-panel layout + stripViewModeShow exposure
+//   index.html: new mode-panel container + tab-button rewired
+//   tests-js/baselines/seed42_v153.json: regenerated baseline
+const SIM_VERSION = 153;
 

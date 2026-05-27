@@ -16,6 +16,8 @@ function hideAllMenuAndModePanels() {
     'fortress-panel', 'groove-panel', 'idle-panel',
     'library-panel', 'random-panel',
     'topo-panel',
+    // HELIX-OVERLAY-FORK ADDITION (v153): strip view mode panel.
+    'strip-view-mode-panel',
   ];
   for (const id of ids) {
     const el = document.getElementById(id);
@@ -241,6 +243,9 @@ function switchMode(mode) {
   const modeCurrent = document.getElementById('mode-current');
   const modeGroove = document.getElementById('mode-groove');
   const modeLibrary = document.getElementById('mode-library');
+  // HELIX-OVERLAY-FORK ADDITION (v153): strip view as a proper mode.
+  const modeStripView = document.getElementById('mode-stripview');
+  const stripViewModePanel = document.getElementById('strip-view-mode-panel');
 
   // Pause background activity before leaving it.
   if (mode !== 'idle' && idleRunning && !idlePaused && typeof idleTogglePause === 'function') {
@@ -286,6 +291,8 @@ function switchMode(mode) {
   if (modeCurrent) modeCurrent.classList.remove('active');
   if (modeGroove) modeGroove.classList.remove('active');
   if (modeLibrary) modeLibrary.classList.remove('active');
+  if (modeStripView) modeStripView.classList.remove('active');
+  if (stripViewModePanel) stripViewModePanel.style.display = 'none';
 
   if (mode === 'legends') {
     legendsControls.style.display = 'flex';
@@ -311,6 +318,16 @@ function switchMode(mode) {
     const rp = document.getElementById('random-panel');
     if (rp) rp.style.display = 'block';
     timeScale = 5.0;
+  } else if (mode === 'stripview') {
+    // HELIX-OVERLAY-FORK ADDITION (v153): Strip View mode. Mirrors
+    // Record Player ('groove') — own full-page panel that's loaded
+    // post-hoc. Doesn't bind to a sim; just paints the dataset list
+    // and lets the user pick one to view.
+    if (stripViewModePanel) stripViewModePanel.style.display = 'block';
+    if (modeStripView) modeStripView.classList.add('active');
+    if (typeof (window as any).stripViewModeShow === 'function') {
+      (window as any).stripViewModeShow();
+    }
   }
 
   // Remember the active game so the Current Game nav button can
