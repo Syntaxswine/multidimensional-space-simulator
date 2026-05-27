@@ -8869,5 +8869,72 @@
 // IDB + 4 entry-point wirings + full UI tab with expansion, bundling,
 // favorites, markers, cursor, download, upload. Helicoid-as-recorder
 // reframe (Shy's 2026-05-26 design insight) fully realized.
-const SIM_VERSION = 155;
+//
+// ============================================================
+//   v156 — Phase 1c: aragonite frostwork primitive (2026-05-27)
+// ============================================================
+//
+// First post-strip-view-arc commit; back to Phase 1c carbonate
+// cleanup. Un-carves aragonite from the stalactite_demo dripstone-
+// routing test by adding a dedicated 'aragonite_frostwork' geometry
+// primitive that fires for non-twinned air-mode aragonite.
+//
+// GEOLOGICAL CONTEXT
+//
+// Hill & Forti 1997 'Cave Minerals of the World' (§5.3.4 and §10)
+// documents cave aragonite morphology as radiating acicular sprays
+// from a central anchor — the diagnostic 'frostwork' habit. Real-
+// world examples: Frasassi Cave (Italy), Carlsbad Caverns (NM),
+// Wind Cave (SD), Lechuguilla. Frostwork is geologically distinct
+// from smooth-stalactite 'dripstone' morphology (which models
+// calcite-family speleothems per PROPOSAL-HABIT-BIAS Slice 4).
+// v147 promoted aragonite to the SI engine, causing aragonite to
+// fire in stalactite_demo via cascade-shifted RNG — but
+// _resolveCrystalGeomToken had no aragonite-specific air-mode
+// branch, so the v147 commit carved aragonite out of the
+// habit-bias.test.ts dripstone-eligibility assertion as a Phase 1c
+// follow-up.
+//
+// FIX
+//
+// js/99i-renderer-three.ts:
+//   - New _makeAragoniteFrostwork() geometry: 5 thin acicular
+//     needles radiating from common anchor (one central, four
+//     tilted ~30°). Deterministic, no RNG.
+//   - New case 'aragonite_frostwork' in _buildHabitGeom dispatch.
+//   - _GEOM_TOKEN_RATIO entry (0.5; cluster envelope is roughly
+//     square because needles spread laterally as much as vertically).
+//   - Air-mode aragonite override in _resolveCrystalGeomToken,
+//     scoped to NON-twinned crystals. Twinned air-mode aragonite
+//     (cyclic_sextet, contact) continues to route through twin
+//     geom — extending the override to twinned crystals would
+//     require wireframe-renderer parity work that's deferred for
+//     scope control.
+//
+// tests-js/habit-bias.test.ts:
+//   - Lifted the v147 aragonite carve-out. The 'stalactite_demo
+//     crystals route eligible habits through dripstone' test now
+//     asserts air-mode aragonite resolves correctly: non-twinned →
+//     frostwork, twinned → twin geom; neither routes to dripstone.
+//
+// tests-js/aragonite-pseudohex-twin-three.test.ts:
+//   - Documents the v156 override scope. New positive test for
+//     non-twinned air-mode aragonite → 'aragonite_frostwork'.
+//
+// BASELINE INVARIANCE
+//
+// Renderer-only change. seed42_v156.json byte-identical to v155.
+//
+// TESTS
+//
+//   Pre-v156:  1563 tests pass (v155)
+//   Post-v156: 1564 tests pass (+1 frostwork positive case)
+//
+// WHAT v156 SHIPS
+//   js/15-version.ts: this block + SIM_VERSION 155 → 156
+//   js/99i-renderer-three.ts: frostwork geometry + dispatch + resolver
+//   tests-js/habit-bias.test.ts: aragonite carve-out lifted
+//   tests-js/aragonite-pseudohex-twin-three.test.ts: frostwork case
+//   tests-js/baselines/seed42_v156.json: regenerated baseline
+const SIM_VERSION = 156;
 

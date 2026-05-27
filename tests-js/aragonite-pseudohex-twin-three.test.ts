@@ -135,6 +135,12 @@ describe('aragonite-pseudohex-twin (99i) — _resolveCrystalGeomToken dispatch',
     expect(_resolveCrystalGeomToken(c, c.habit)).not.toBe('aragonite_pseudohex_twin');
   });
 
+  // v156 (Phase 1c, 2026-05-27) note: a non-twinned air-mode aragonite
+  // override was added to route those crystals through the new
+  // 'aragonite_frostwork' primitive. Twinned air-mode aragonite (the
+  // case tested below) still routes through the twin geom — the
+  // override is scoped to !twinned. See _resolveCrystalGeomToken header
+  // comment for the deferred-extension rationale (wireframe parity).
   it('twinned aragonite in air-mode cavity → twin token (beats dripstone)', () => {
     const c = mkAragonite({
       twinned: true, twin_law: 'cyclic_sextet',
@@ -146,5 +152,14 @@ describe('aragonite-pseudohex-twin (99i) — _resolveCrystalGeomToken dispatch',
   it('twinned aragonite with acicular habit still resolves to twin', () => {
     const c = mkAragonite({ twinned: true, twin_law: 'cyclic_sextet', habit: 'acicular_needle' });
     expect(_resolveCrystalGeomToken(c, c.habit)).toBe('aragonite_pseudohex_twin');
+  });
+
+  it('NON-twinned air-mode aragonite → frostwork (v156)', () => {
+    const c = mkAragonite({
+      twinned: false,
+      growth_environment: 'air',
+      habit: 'acicular_needle',
+    });
+    expect(_resolveCrystalGeomToken(c, c.habit)).toBe('aragonite_frostwork');
   });
 });

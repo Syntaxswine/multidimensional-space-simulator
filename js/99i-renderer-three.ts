@@ -604,6 +604,10 @@ const _GEOM_TOKEN_RATIO: Record<string, number> = {
   snowball: 1.0,
   botryoidal: 1.5,    // wall-crust — wider than tall
   dripstone: 0.25,    // PROPOSAL-HABIT-BIAS Slice 4 — slim icicle, c >> a
+  aragonite_frostwork: 0.5,  // Phase 1c (v156) — radiating spray; envelope
+                             // is roughly square (cluster spreads as much
+                             // laterally as vertically) so c/a is moderate
+                             // even though individual needles are slim.
 };
 
 // PROPOSAL-HABIT-BIAS Slice 4 — which canonical habit tokens can
@@ -635,6 +639,32 @@ const _DRIPSTONE_ELIGIBLE_TOKENS = new Set([
 // trilling, pyrite iron-cross, galena octahedron-twin, aragonite
 // pseudo-hex) plug into this same gate.
 function _resolveCrystalGeomToken(crystal: any, habitForGeom: string): string {
+  // Phase 1c (v156, 2026-05-27): non-twinned air-mode aragonite →
+  // frostwork. Real cave aragonite (Hill & Forti 1997 — Cave Minerals
+  // of the World §5.3.4, §10) grows as radiating acicular sprays from
+  // a central anchor — diagnostic cave-aragonite morphology at
+  // Frasassi, Carlsbad, Wind Cave, and dozens of other cave systems
+  // worldwide. This is geologically distinct from smooth-stalactite
+  // 'dripstone' morphology (which models calcite/calcite-family
+  // speleothems).
+  //
+  // Scoping note: the override fires only for NON-twinned air-mode
+  // aragonite. Twinned air-mode aragonite (cyclic_sextet, contact)
+  // continues to route through the twin-geom branches below. The
+  // pseudo-hex twin in caves arguably reads as a 6-fold radiating
+  // frostwork cluster too, but extending the override to twinned
+  // crystals would require parallel changes in the wireframe
+  // renderer's _lookupCrystalPrimitive + adding a PRIM_ARAGONITE_FROSTWORK
+  // 2D primitive — scope deferred to a future commit. The current
+  // override covers the more common acicular_needle / columnar /
+  // botryoidal_crust variants of aragonite, which is sufficient to
+  // un-carve aragonite from the stalactite_demo dripstone-routing
+  // test.
+  if (crystal && crystal.mineral === 'aragonite'
+      && crystal.growth_environment === 'air'
+      && !crystal.twinned) {
+    return 'aragonite_frostwork';
+  }
   if (crystal && crystal.mineral === 'fluorite' && crystal.twinned
       && crystal.twin_law === 'penetration') {
     return 'fluorite_penetration_twin';
@@ -913,6 +943,70 @@ function _makeHexPyramid(): any {
     const x0 = Math.cos(a0) * r, z0 = Math.sin(a0) * r;
     const x1 = Math.cos(a1) * r, z1 = Math.sin(a1) * r;
     _pushTri(positions, x0, yBase, z0, x1, yBase, z1, 0, yApex, 0);
+  }
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geom.computeVertexNormals();
+  return geom;
+}
+
+// Phase 1c (v156, 2026-05-27): aragonite cave frostwork — radiating
+// spray of acicular needles from a central anchor. Real cave aragonite
+// morphology per Hill & Forti 1997 (Cave Minerals of the World §5.3.4,
+// §10). Used when growth_environment === 'air' and mineral === 'aragonite'
+// (see _resolveCrystalGeomToken). Distinguished from the generic
+// 'dripstone' icicle: frostwork is a splayed multi-needle cluster, not
+// a single tapered cone. Five needles radiating from a common base —
+// one central (straight up), four tilted at ~30° in the four cardinal
+// directions. Deterministic geometry (no RNG); identical across runs.
+function _makeAragoniteFrostwork(): any {
+  const positions: number[] = [];
+  const baseY = -0.50;
+  const needleLen = 1.0;       // each needle reaches roughly unit height
+  const needleR = 0.04;        // very thin — acicular
+  // 5 needles radiating from the base nucleus. Axes give needle
+  // direction in unit-cube coordinates; each is normalized below.
+  const needleAxes: Array<[number, number, number]> = [
+    [0,     1.00, 0    ],     // central spike (straight up)
+    [0.45,  0.90, 0    ],     // tilt +x
+    [-0.45, 0.90, 0    ],     // tilt -x
+    [0,     0.90, 0.45 ],     // tilt +z
+    [0,     0.90, -0.45],     // tilt -z
+  ];
+  for (const ax of needleAxes) {
+    const m = Math.hypot(ax[0], ax[1], ax[2]);
+    const nx = ax[0] / m, ny = ax[1] / m, nz = ax[2] / m;
+    // Build a perpendicular basis (a, b) for the needle's cross-section.
+    let ux = -ny, uy = nx, uz = 0;
+    const ulen = Math.hypot(ux, uy, uz);
+    if (ulen < 1e-6) { ux = 1; uy = 0; uz = 0; }
+    else { ux /= ulen; uy /= ulen; uz /= ulen; }
+    const vx = ny * uz - nz * uy;
+    const vy = nz * ux - nx * uz;
+    const vz = nx * uy - ny * ux;
+    // Square cross-section ring at the needle's base; tip at base + len * axis
+    const tipX = nx * needleLen;
+    const tipY = baseY + ny * needleLen;
+    const tipZ = nz * needleLen;
+    const ring: Array<[number, number, number]> = [];
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const ru = Math.cos(a) * needleR;
+      const rv = Math.sin(a) * needleR;
+      ring.push([
+        ru * ux + rv * vx,
+        baseY + ru * uy + rv * vy,
+        ru * uz + rv * vz,
+      ]);
+    }
+    // 4 pyramid faces — each ring edge to the tip.
+    for (let i = 0; i < 4; i++) {
+      const p0 = ring[i], p1 = ring[(i + 1) % 4];
+      _pushTri(positions,
+        p0[0], p0[1], p0[2],
+        p1[0], p1[1], p1[2],
+        tipX, tipY, tipZ);
+    }
   }
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
@@ -1815,6 +1909,12 @@ function _buildHabitGeom(token: string): any {
       // canonical token is dripstone-eligible (see
       // _resolveCrystalGeomToken).
       return _makeDripstoneIcicle();
+    case 'aragonite_frostwork':
+      // Phase 1c (v156, 2026-05-27): cave aragonite frostwork —
+      // radiating acicular spray from a central anchor. Real cave
+      // aragonite morphology per Hill & Forti 1997. Dispatch gated on
+      // mineral='aragonite' + growth_environment='air'.
+      return _makeAragoniteFrostwork();
     default:
       return _makeHexPrismWithPyramid();
   }

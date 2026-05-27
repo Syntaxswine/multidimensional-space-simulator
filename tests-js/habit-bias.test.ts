@@ -332,24 +332,36 @@ describe('habit-bias Slice 4 — _resolveCrystalGeomToken air-mode override', ()
     // → 'prism'; etc.) so this is a real cross-section.
     //
     // v147 (Week 12 aragonite SI promotion): aragonite now fires in
-    // stalactite_demo via the cascade-shifted RNG (4 active crystals).
-    // Aragonite habit `aragonite_pseudohex_twin` normalizes to an
-    // eligible canonical token but does NOT route through dripstone —
-    // aragonite cave morphology is acicular/needle/frostwork
-    // (Hill & Forti 1997 'Cave Minerals of the World'), not the
-    // stalactite/stalagmite morphology dripstone primitive models.
-    // Skipping aragonite from the dripstone-eligibility assertion is
-    // geologically correct; the resolver's not handling aragonite
-    // habits is a pre-existing gap surfaced by v147 firings, not a
-    // regression to fix in this commit. Phase 1c candidate to extend
-    // _resolveCrystalGeomToken aragonite branch with a dedicated
-    // frostwork/acicular primitive.
+    // stalactite_demo via the cascade-shifted RNG. Aragonite cave
+    // morphology is acicular/frostwork (Hill & Forti 1997 'Cave
+    // Minerals of the World' §5.3.4, §10), not smooth stalactite —
+    // v147 carved aragonite out of the dripstone assertion as a Phase
+    // 1c follow-up.
+    //
+    // Phase 1c (v156, 2026-05-27): added _resolveCrystalGeomToken
+    // aragonite air-mode branch routing NON-twinned cave aragonite to
+    // 'aragonite_frostwork', a dedicated radiating-spray primitive
+    // (Hill & Forti 1997 §10). Twinned aragonite (cyclic_sextet,
+    // contact) still routes through the twin geom branches because
+    // wireframe-renderer parity for a frostwork primitive is deferred
+    // to a future commit. The non-twinned override is sufficient to
+    // un-carve aragonite from the dripstone-routing assertion.
     const sim = runScenario('stalactite_demo', { seed: 42 });
     let eligibleAirHits = 0;
     for (const c of sim.crystals) {
-      if (c.mineral === 'aragonite') continue;  // v147 carve-out
       const canonical = _habitGeomToken(c.habit);
       const resolved = _resolveCrystalGeomToken(c, c.habit);
+      if (c.mineral === 'aragonite' && c.growth_environment === 'air') {
+        // v156: non-twinned cave aragonite → frostwork; twinned cave
+        // aragonite → twin geom (cyclic_sextet, contact). Both are
+        // geologically defensible; neither is 'dripstone'.
+        if (!c.twinned) {
+          expect(resolved).toBe('aragonite_frostwork');
+        } else {
+          expect(resolved).toMatch(/^(aragonite_pseudohex_twin|aragonite_contact_twin)$/);
+        }
+        continue;
+      }
       if (c.growth_environment === 'air'
           && ['prism','spike','rhomb','scalene','botryoidal'].includes(canonical)) {
         expect(resolved).toBe('dripstone');
