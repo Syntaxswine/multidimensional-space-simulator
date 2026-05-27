@@ -8936,5 +8936,154 @@
 //   tests-js/habit-bias.test.ts: aragonite carve-out lifted
 //   tests-js/aragonite-pseudohex-twin-three.test.ts: frostwork case
 //   tests-js/baselines/seed42_v156.json: regenerated baseline
-const SIM_VERSION = 156;
+
+// ============================================================
+//   v157 — Helicoid chip reads → mesh.cells (2026-05-27)
+// ============================================================
+//
+// Re-points every chemistry chip read in _HELIX_CHEM_PARAMS from the
+// vestigial `ring_fluids[i]` backing store to the live per-vertex
+// `mesh.cells[i*N+c].fluid` store. Boss-directed: "mesh.cells is the
+// way to go, i've wanted to head that way for ages." Architectural
+// direction, not just bug-fix scope.
+//
+// WHAT WAS WRONG
+//
+// Post-Tranche-2+ of PROPOSAL-CAVITY-MESH (the un-aliasing of mesh
+// cells from ring_fluids), the live chemistry handle moved to
+// mesh.cells[].fluid. Engines read through it via the per-cell swap
+// in _runEngineForCrystal. Mass-balance debits hit cell.fluid.
+// Inter-cell diffusion (_diffuseRingState → mesh.diffuse) operates
+// on cell.fluid. But `_HELIX_CHEM_PARAMS` chip reads were never
+// migrated — they kept reading `(s.ring_fluids || [])[i]`.
+//
+// ring_fluids[] is still allocated in the simulator constructor (one
+// clone per ring). It's also still aliased at the equator slot:
+// `this.ring_fluids[equator] = this.conditions.fluid`. Events write
+// to conditions.fluid → ring_fluids[equator] sees the event update.
+// But the other 15 rings get NO chemistry update — they stay at the
+// initial broth for the entire run, because nothing syncs ring_fluids
+// to mesh.cells after the un-aliasing.
+//
+// VISUAL FINGERPRINT
+//
+// Both the live helicoid chip trails AND the strip-view recording
+// rendered an inverted-V pyramid centered on the equator (height 8 of
+// 16) for EVERY chemistry chip whose value moved during the run. The
+// pyramid looked the same in every time strip because the artifact is
+// structural (frozen at equator-only event chemistry) rather than
+// step-varying. The wall_distance chip ALSO has a legitimate
+// triangular profile (cavity radius peaks at the equator via
+// radius * sin(phi)) — so the pyramid was two effects stacked,
+// hiding the artifact behind a legit geometric signal.
+//
+// Boss noticed the pyramid in a gem_pegmatite strip-view screenshot,
+// asked "what's going on in the middle of this graph?" — diagnostic
+// surfaced via that question.
+//
+// FIX
+//
+// js/99j-helix-overlay.ts:
+//   - New _chipFluid(s, w, ri, c) helper inside the _HELIX_CHEM_PARAMS
+//     IIFE. Prefers mesh.cells[ri*N+c].fluid (via w.meshFor(s).cells);
+//     falls back to (s.ring_fluids || [])[ri] only when no mesh is
+//     reachable.
+//   - Every chemistry chip read function rewired through _chipFluid:
+//     5 specials (pH, Eh, salinity, O2), 9 carbonate-system (DIC,
+//     CO2aq, HCO3, CO3_2, SI_calcite, SI_aragonite, SI_dolomite,
+//     SI_HMC, SI_siderite, pCO2; f_ord stays global), 41 ion chips
+//     (the ION_DEFS loop body).
+//   - Unchanged: wall_distance chip (already uses wall.rings[i]
+//     geometry), temperature chip (uses ring_temperatures which IS
+//     synced cavity-wide), f_ord chip (global cycle counter).
+//
+// REPLAY PATH PRESERVED
+//
+// The historical-replay rendering path uses _helixSimAtSnap +
+// _helixWallAtSnap to build sim-shaped + wall-shaped proxies from
+// wall_state_history snapshots. The wall proxy does NOT expose a
+// meshFor method. _chipFluid's mesh check fails, falls through to
+// the snap's ring_fluids[i] — which is exactly the historical
+// behavior. Replay continues to read per-ring snap chemistry; no
+// snap-schema change needed. (Future work: capture mesh.cells[].fluid
+// in snapshots so replay also shows per-cell chemistry. Out of scope
+// for v157.)
+//
+// BEHAVIOR CHANGES
+//
+// Live helicoid chip trails: chemistry chips that were showing an
+// equator spike now render as the actual per-cell chemistry — usually
+// uniform across the cavity (because mesh.cells are uniformly updated
+// today), but where crystals are growing locally the chip values
+// reflect mass-balance depletion at those specific cells. The strip
+// view shows the same: most chips flat across heights, but at cells
+// where crystals consume species heavily the chip drops at that
+// specific height.
+//
+// Probe (tools/strip_recorder_post_fix_probe.mjs) at gem_pegmatite
+// seed 42:
+//   step  10: pH spread 0, CO3 spread 0, SI_calcite spread 0 (uniform)
+//   step 100: pH spread 4, Na spread 51, SI_calcite spread 10
+//             (one cell at height 8 carries real local chemistry
+//              from a growing crystal there)
+//   step 200: SI_calcite drops from 64 (rest) to 0 (-3 log Ω) at
+//             that single cell — heavy local precipitation effect
+//             made visible for the first time.
+//
+// BASELINE INVARIANCE
+//
+// Renderer-only change. The simulator's engine path was already
+// reading from mesh.cells via _runEngineForCrystal. Only the helicoid
+// chip-display + strip-view-recording paths changed. seed42_v157.json
+// byte-identical to v156.
+//
+// VESTIGIAL ring_fluids STATUS
+//
+// ring_fluids[] is now SOLELY a vestigial backing store. It receives
+// event writes (at equator only, via the alias). Nothing reads from
+// it for chemistry purposes except the replay-snap fallback path.
+// Three options for future cleanup, in increasing scope:
+//   (a) Add end-of-step sync from mesh.cells back into ring_fluids[]
+//       so diagnostic readers see fresh chemistry. Cheap.
+//   (b) Replace the event-time alias with a propagation function that
+//       writes event mutations directly into every mesh cell. Removes
+//       the equator privilege; symmetric across the cavity.
+//   (c) Remove ring_fluids[] entirely. Touches the snap-capture path,
+//       the diffuse helper, the simulator constructor. Bigger refactor.
+// All three are deferrable. v157 keeps ring_fluids[] as-is and
+// documents its vestigial status.
+//
+// TESTS
+//
+//   Pre-v157:  1564 tests pass (v156)
+//   Post-v157: 1564 tests pass (renderer-only; no test changes)
+//
+// PROBE TOOLS LANDED IN THIS SESSION
+//
+//   tools/dolomite_cap_probe.mjs               (rejected the bypass-bug
+//                                                diagnosis)
+//   tools/sunnyside_calcite_omega_probe.mjs    (first iteration; led to
+//                                                ring_fluids false alarm)
+//   tools/ring_sync_probe.mjs                  (cross-scenario confirmation
+//                                                that ring_fluids[k] are
+//                                                stuck — turned out to be
+//                                                a vestigial-store artifact)
+//   tools/sunnyside_nucleation_gate_probe.mjs  (correctly samples engine
+//                                                path; surfaced omega=1.045
+//                                                vs sigma_crit=1.5 marginal
+//                                                case)
+//   tools/strip_recorder_post_fix_probe.mjs    (verifies post-rewire that
+//                                                chemistry chips render
+//                                                uniformly across heights)
+//
+// WHAT v157 SHIPS
+//   js/15-version.ts: this block + SIM_VERSION 156 → 157
+//   js/99j-helix-overlay.ts: _chipFluid helper + all chemistry chip
+//     reads rewired to mesh.cells with ring_fluids fallback
+//   tools/*.mjs: 5 new probe tools (listed above)
+//   proposals/HANDOFF-CARBONATE-PHASE-1-COMPLETE.md: Phase 1c items
+//     rejected (dolomite cap, sunnyside CO3 bump), multi-condition
+//     nucleation envelope architectural note added, ring_fluids
+//     vestigial status documented
+const SIM_VERSION = 157;
 

@@ -13694,7 +13694,155 @@ let timeScale = 5.0;
 //   tests-js/habit-bias.test.ts: aragonite carve-out lifted
 //   tests-js/aragonite-pseudohex-twin-three.test.ts: frostwork case
 //   tests-js/baselines/seed42_v156.json: regenerated baseline
-const SIM_VERSION = 156;
+// ============================================================
+//   v157 — Helicoid chip reads → mesh.cells (2026-05-27)
+// ============================================================
+//
+// Re-points every chemistry chip read in _HELIX_CHEM_PARAMS from the
+// vestigial `ring_fluids[i]` backing store to the live per-vertex
+// `mesh.cells[i*N+c].fluid` store. Boss-directed: "mesh.cells is the
+// way to go, i've wanted to head that way for ages." Architectural
+// direction, not just bug-fix scope.
+//
+// WHAT WAS WRONG
+//
+// Post-Tranche-2+ of PROPOSAL-CAVITY-MESH (the un-aliasing of mesh
+// cells from ring_fluids), the live chemistry handle moved to
+// mesh.cells[].fluid. Engines read through it via the per-cell swap
+// in _runEngineForCrystal. Mass-balance debits hit cell.fluid.
+// Inter-cell diffusion (_diffuseRingState → mesh.diffuse) operates
+// on cell.fluid. But `_HELIX_CHEM_PARAMS` chip reads were never
+// migrated — they kept reading `(s.ring_fluids || [])[i]`.
+//
+// ring_fluids[] is still allocated in the simulator constructor (one
+// clone per ring). It's also still aliased at the equator slot:
+// `this.ring_fluids[equator] = this.conditions.fluid`. Events write
+// to conditions.fluid → ring_fluids[equator] sees the event update.
+// But the other 15 rings get NO chemistry update — they stay at the
+// initial broth for the entire run, because nothing syncs ring_fluids
+// to mesh.cells after the un-aliasing.
+//
+// VISUAL FINGERPRINT
+//
+// Both the live helicoid chip trails AND the strip-view recording
+// rendered an inverted-V pyramid centered on the equator (height 8 of
+// 16) for EVERY chemistry chip whose value moved during the run. The
+// pyramid looked the same in every time strip because the artifact is
+// structural (frozen at equator-only event chemistry) rather than
+// step-varying. The wall_distance chip ALSO has a legitimate
+// triangular profile (cavity radius peaks at the equator via
+// radius * sin(phi)) — so the pyramid was two effects stacked,
+// hiding the artifact behind a legit geometric signal.
+//
+// Boss noticed the pyramid in a gem_pegmatite strip-view screenshot,
+// asked "what's going on in the middle of this graph?" — diagnostic
+// surfaced via that question.
+//
+// FIX
+//
+// js/99j-helix-overlay.ts:
+//   - New _chipFluid(s, w, ri, c) helper inside the _HELIX_CHEM_PARAMS
+//     IIFE. Prefers mesh.cells[ri*N+c].fluid (via w.meshFor(s).cells);
+//     falls back to (s.ring_fluids || [])[ri] only when no mesh is
+//     reachable.
+//   - Every chemistry chip read function rewired through _chipFluid:
+//     5 specials (pH, Eh, salinity, O2), 9 carbonate-system (DIC,
+//     CO2aq, HCO3, CO3_2, SI_calcite, SI_aragonite, SI_dolomite,
+//     SI_HMC, SI_siderite, pCO2; f_ord stays global), 41 ion chips
+//     (the ION_DEFS loop body).
+//   - Unchanged: wall_distance chip (already uses wall.rings[i]
+//     geometry), temperature chip (uses ring_temperatures which IS
+//     synced cavity-wide), f_ord chip (global cycle counter).
+//
+// REPLAY PATH PRESERVED
+//
+// The historical-replay rendering path uses _helixSimAtSnap +
+// _helixWallAtSnap to build sim-shaped + wall-shaped proxies from
+// wall_state_history snapshots. The wall proxy does NOT expose a
+// meshFor method. _chipFluid's mesh check fails, falls through to
+// the snap's ring_fluids[i] — which is exactly the historical
+// behavior. Replay continues to read per-ring snap chemistry; no
+// snap-schema change needed. (Future work: capture mesh.cells[].fluid
+// in snapshots so replay also shows per-cell chemistry. Out of scope
+// for v157.)
+//
+// BEHAVIOR CHANGES
+//
+// Live helicoid chip trails: chemistry chips that were showing an
+// equator spike now render as the actual per-cell chemistry — usually
+// uniform across the cavity (because mesh.cells are uniformly updated
+// today), but where crystals are growing locally the chip values
+// reflect mass-balance depletion at those specific cells. The strip
+// view shows the same: most chips flat across heights, but at cells
+// where crystals consume species heavily the chip drops at that
+// specific height.
+//
+// Probe (tools/strip_recorder_post_fix_probe.mjs) at gem_pegmatite
+// seed 42:
+//   step  10: pH spread 0, CO3 spread 0, SI_calcite spread 0 (uniform)
+//   step 100: pH spread 4, Na spread 51, SI_calcite spread 10
+//             (one cell at height 8 carries real local chemistry
+//              from a growing crystal there)
+//   step 200: SI_calcite drops from 64 (rest) to 0 (-3 log Ω) at
+//             that single cell — heavy local precipitation effect
+//             made visible for the first time.
+//
+// BASELINE INVARIANCE
+//
+// Renderer-only change. The simulator's engine path was already
+// reading from mesh.cells via _runEngineForCrystal. Only the helicoid
+// chip-display + strip-view-recording paths changed. seed42_v157.json
+// byte-identical to v156.
+//
+// VESTIGIAL ring_fluids STATUS
+//
+// ring_fluids[] is now SOLELY a vestigial backing store. It receives
+// event writes (at equator only, via the alias). Nothing reads from
+// it for chemistry purposes except the replay-snap fallback path.
+// Three options for future cleanup, in increasing scope:
+//   (a) Add end-of-step sync from mesh.cells back into ring_fluids[]
+//       so diagnostic readers see fresh chemistry. Cheap.
+//   (b) Replace the event-time alias with a propagation function that
+//       writes event mutations directly into every mesh cell. Removes
+//       the equator privilege; symmetric across the cavity.
+//   (c) Remove ring_fluids[] entirely. Touches the snap-capture path,
+//       the diffuse helper, the simulator constructor. Bigger refactor.
+// All three are deferrable. v157 keeps ring_fluids[] as-is and
+// documents its vestigial status.
+//
+// TESTS
+//
+//   Pre-v157:  1564 tests pass (v156)
+//   Post-v157: 1564 tests pass (renderer-only; no test changes)
+//
+// PROBE TOOLS LANDED IN THIS SESSION
+//
+//   tools/dolomite_cap_probe.mjs               (rejected the bypass-bug
+//                                                diagnosis)
+//   tools/sunnyside_calcite_omega_probe.mjs    (first iteration; led to
+//                                                ring_fluids false alarm)
+//   tools/ring_sync_probe.mjs                  (cross-scenario confirmation
+//                                                that ring_fluids[k] are
+//                                                stuck — turned out to be
+//                                                a vestigial-store artifact)
+//   tools/sunnyside_nucleation_gate_probe.mjs  (correctly samples engine
+//                                                path; surfaced omega=1.045
+//                                                vs sigma_crit=1.5 marginal
+//                                                case)
+//   tools/strip_recorder_post_fix_probe.mjs    (verifies post-rewire that
+//                                                chemistry chips render
+//                                                uniformly across heights)
+//
+// WHAT v157 SHIPS
+//   js/15-version.ts: this block + SIM_VERSION 156 → 157
+//   js/99j-helix-overlay.ts: _chipFluid helper + all chemistry chip
+//     reads rewired to mesh.cells with ring_fluids fallback
+//   tools/*.mjs: 5 new probe tools (listed above)
+//   proposals/HANDOFF-CARBONATE-PHASE-1-COMPLETE.md: Phase 1c items
+//     rejected (dolomite cap, sunnyside CO3 bump), multi-condition
+//     nucleation envelope architectural note added, ring_fluids
+//     vestigial status documented
+const SIM_VERSION = 157;
 
 // ── 18-constants.js ──
 
@@ -64045,6 +64193,58 @@ const _HELIX_FULL_NAMES = {
 };
 const _HELIX_CHEM_PARAMS = (function () {
     const params = [];
+    // ---- per-cell read helper (v157, 2026-05-27) -----------------------
+    //
+    // Chip read functions used to sample (s.ring_fluids || [])[i] for every
+    // chemistry chip, which made them read from a NOW-VESTIGIAL backing
+    // store. Post-Tranche-2+ of PROPOSAL-CAVITY-MESH the live chemistry
+    // lives in mesh.cells[ri * cells_per_ring + c].fluid — per-vertex
+    // clones that receive event chemistry + engine mass-balance + Laplacian
+    // diffusion. ring_fluids[] still exists; events still write to
+    // ring_fluids[equator] via the alias to conditions.fluid; but no other
+    // ring receives any chemistry update.
+    //
+    // Visual fingerprint of the bug: every chemistry chip showed an
+    // inverted-V spike centered on the equator height (ring 8 of 16) in
+    // both the live helicoid trails AND the strip view recording — because
+    // ring 8 had event-bumped chemistry while the other 15 rings sat
+    // frozen at the initial broth. Per-chip normalization across the
+    // dataset then mapped ring-8 highs to ~1.0 and edge lows to ~0,
+    // producing identical pyramids across every time step.
+    //
+    // The fix is to prefer mesh.cells[ri*N+c].fluid (the live store) and
+    // fall back to ring_fluids[ri] only when no mesh is reachable. The
+    // fallback path lights up exclusively during replay rendering, where
+    // _helixWallAtSnap returns a wall-shaped proxy that has no meshFor
+    // method — so replay continues to read from the snap's frozen
+    // ring_fluids array (correct historical behavior).
+    //
+    // Live + strip-recorder both flow through the mesh path: they pass
+    // the real wall_state to chip reads, and wall_state.meshFor(sim)
+    // returns the constructor-invariant mesh whose cell.fluid is the
+    // canonical live chemistry handle. After this rewire, chemistry
+    // chips that have uniform values across cells render as flat
+    // horizontal lines (which is honest — chemistry IS uniform across
+    // cells today, modulo near-vanishing diffusion gradients). Once
+    // per-vertex spatial chemistry expansion lands, the same chip reads
+    // will surface real height + angular gradients without any further
+    // wiring change.
+    //
+    // Boss framing 2026-05-27: "mesh.cells is the way to go, i've wanted
+    // to head that way for ages" — explicit architectural direction, not
+    // just bug-fix scope.
+    const _chipFluid = (s, w, ri, c) => {
+        if (w && typeof w.meshFor === 'function') {
+            const mesh = w.meshFor(s);
+            if (mesh && mesh.cells) {
+                const N = (w.cells_per_ring | 0) || 120;
+                const cell = mesh.cells[ri * N + (c | 0)];
+                if (cell && cell.fluid)
+                    return cell.fluid;
+            }
+        }
+        return (s.ring_fluids || [])[ri];
+    };
     // Primary
     params.push({
         id: 'wall', label: 'wall distance', fullName: _HELIX_FULL_NAMES.wall,
@@ -64082,13 +64282,13 @@ const _HELIX_CHEM_PARAMS = (function () {
     params.push({ id: 'T', label: 'temperature', fullName: _HELIX_FULL_NAMES.T, min: 50, max: 250, color: 0xff5544,
         read: (s, w, i, c) => (s.ring_temperatures || [])[i] });
     params.push({ id: 'pH', label: 'pH', fullName: _HELIX_FULL_NAMES.pH, min: 2, max: 12, color: 0x9966ee,
-        read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).pH });
+        read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).pH });
     params.push({ id: 'Eh', label: 'Eh', fullName: _HELIX_FULL_NAMES.Eh, min: -400, max: 800, color: 0xddee44,
-        read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).Eh });
+        read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).Eh });
     params.push({ id: 'salinity', label: 'salinity', fullName: _HELIX_FULL_NAMES.salinity, min: 0, max: 30, color: 0x44ccdd,
-        read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).salinity });
+        read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).salinity });
     params.push({ id: 'O2', label: 'O2', fullName: _HELIX_FULL_NAMES.O2, min: 0, max: 10, color: 0xaaccff,
-        read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).O2 });
+        read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).O2 });
     // === HELIX-OVERLAY-FORK ADDITION (Week 3 carbonate) ===============
     // PROPOSAL-CARBONATE-GEOCHEM Phase 1 Week 3 — Carbonate System chips.
     //
@@ -64115,7 +64315,7 @@ const _HELIX_CHEM_PARAMS = (function () {
     const _HMC_DEFAULT_MG = 0.10;
     const _F_ORD_N0 = 7;
     const _readSI = (mineralId) => (s, w, i, c) => {
-        const f = (s.ring_fluids || [])[i];
+        const f = _chipFluid(s, w, i, c);
         if (!f)
             return null;
         const T = (s.ring_temperatures || [])[i];
@@ -64128,13 +64328,13 @@ const _HELIX_CHEM_PARAMS = (function () {
     params.push({
         id: 'DIC', label: 'DIC', fullName: _HELIX_FULL_NAMES.DIC,
         min: 0, max: 500, color: 0xC9A875,
-        read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).CO3,
+        read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).CO3,
     });
     params.push({
         id: 'CO2aq', label: 'CO₂', fullName: _HELIX_FULL_NAMES.CO2aq,
         min: 0, max: 500, color: 0xF5E5A0,
         read: (s, w, i, c) => {
-            const f = (s.ring_fluids || [])[i];
+            const f = _chipFluid(s, w, i, c);
             if (!f || typeof f.CO3 !== 'number' || f.CO3 <= 0)
                 return null;
             const T = (s.ring_temperatures || [])[i];
@@ -64149,7 +64349,7 @@ const _HELIX_CHEM_PARAMS = (function () {
         id: 'HCO3', label: 'HCO₃', fullName: _HELIX_FULL_NAMES.HCO3,
         min: 0, max: 500, color: 0x6B96D9,
         read: (s, w, i, c) => {
-            const f = (s.ring_fluids || [])[i];
+            const f = _chipFluid(s, w, i, c);
             if (!f || typeof f.CO3 !== 'number' || f.CO3 <= 0)
                 return null;
             const T = (s.ring_temperatures || [])[i];
@@ -64164,7 +64364,7 @@ const _HELIX_CHEM_PARAMS = (function () {
         id: 'CO3_2', label: 'CO₃²⁻', fullName: _HELIX_FULL_NAMES.CO3_2,
         min: 0, max: 50, color: 0x4A7FE0,
         read: (s, w, i, c) => {
-            const f = (s.ring_fluids || [])[i];
+            const f = _chipFluid(s, w, i, c);
             if (!f)
                 return null;
             const T = (s.ring_temperatures || [])[i];
@@ -64193,7 +64393,7 @@ const _HELIX_CHEM_PARAMS = (function () {
         id: 'SI_HMC', label: 'SI HMC', fullName: _HELIX_FULL_NAMES.SI_HMC,
         min: -3, max: 3, color: 0x9078A0,
         read: (s, w, i, c) => {
-            const f = (s.ring_fluids || [])[i];
+            const f = _chipFluid(s, w, i, c);
             if (!f)
                 return null;
             const T = (s.ring_temperatures || [])[i];
@@ -64213,7 +64413,7 @@ const _HELIX_CHEM_PARAMS = (function () {
         id: 'pCO2', label: 'pCO₂', fullName: _HELIX_FULL_NAMES.pCO2,
         min: 0, max: 1, color: 0x4DBC5C,
         read: (s, w, i, c) => {
-            const f = (s.ring_fluids || [])[i];
+            const f = _chipFluid(s, w, i, c);
             if (!f)
                 return null;
             const T = (s.ring_temperatures || [])[i];
@@ -64260,7 +64460,7 @@ const _HELIX_CHEM_PARAMS = (function () {
         const fullName = _HELIX_FULL_NAMES[ionId] || ionId;
         params.push({
             id: ionId, label: ionId, fullName, min: mn, max: mx, color,
-            read: (s, w, ri, c) => ((s.ring_fluids || [])[ri] || {})[ionId],
+            read: (s, w, ri, c) => (_chipFluid(s, w, ri, c) || {})[ionId],
         });
     }
     return params;

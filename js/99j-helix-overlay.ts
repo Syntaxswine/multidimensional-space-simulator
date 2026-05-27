@@ -207,6 +207,58 @@ const _HELIX_FULL_NAMES: { [id: string]: string } = {
 const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
   const params: ChemParam[] = [];
 
+  // ---- per-cell read helper (v157, 2026-05-27) -----------------------
+  //
+  // Chip read functions used to sample (s.ring_fluids || [])[i] for every
+  // chemistry chip, which made them read from a NOW-VESTIGIAL backing
+  // store. Post-Tranche-2+ of PROPOSAL-CAVITY-MESH the live chemistry
+  // lives in mesh.cells[ri * cells_per_ring + c].fluid — per-vertex
+  // clones that receive event chemistry + engine mass-balance + Laplacian
+  // diffusion. ring_fluids[] still exists; events still write to
+  // ring_fluids[equator] via the alias to conditions.fluid; but no other
+  // ring receives any chemistry update.
+  //
+  // Visual fingerprint of the bug: every chemistry chip showed an
+  // inverted-V spike centered on the equator height (ring 8 of 16) in
+  // both the live helicoid trails AND the strip view recording — because
+  // ring 8 had event-bumped chemistry while the other 15 rings sat
+  // frozen at the initial broth. Per-chip normalization across the
+  // dataset then mapped ring-8 highs to ~1.0 and edge lows to ~0,
+  // producing identical pyramids across every time step.
+  //
+  // The fix is to prefer mesh.cells[ri*N+c].fluid (the live store) and
+  // fall back to ring_fluids[ri] only when no mesh is reachable. The
+  // fallback path lights up exclusively during replay rendering, where
+  // _helixWallAtSnap returns a wall-shaped proxy that has no meshFor
+  // method — so replay continues to read from the snap's frozen
+  // ring_fluids array (correct historical behavior).
+  //
+  // Live + strip-recorder both flow through the mesh path: they pass
+  // the real wall_state to chip reads, and wall_state.meshFor(sim)
+  // returns the constructor-invariant mesh whose cell.fluid is the
+  // canonical live chemistry handle. After this rewire, chemistry
+  // chips that have uniform values across cells render as flat
+  // horizontal lines (which is honest — chemistry IS uniform across
+  // cells today, modulo near-vanishing diffusion gradients). Once
+  // per-vertex spatial chemistry expansion lands, the same chip reads
+  // will surface real height + angular gradients without any further
+  // wiring change.
+  //
+  // Boss framing 2026-05-27: "mesh.cells is the way to go, i've wanted
+  // to head that way for ages" — explicit architectural direction, not
+  // just bug-fix scope.
+  const _chipFluid = (s: any, w: any, ri: number, c: number): any => {
+    if (w && typeof w.meshFor === 'function') {
+      const mesh = w.meshFor(s);
+      if (mesh && mesh.cells) {
+        const N = (w.cells_per_ring | 0) || 120;
+        const cell = mesh.cells[ri * N + (c | 0)];
+        if (cell && cell.fluid) return cell.fluid;
+      }
+    }
+    return (s.ring_fluids || [])[ri];
+  };
+
   // Primary
   params.push({
     id: 'wall', label: 'wall distance', fullName: _HELIX_FULL_NAMES.wall,
@@ -241,13 +293,13 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
   params.push({ id: 'T',        label: 'temperature', fullName: _HELIX_FULL_NAMES.T,        min: 50,   max: 250,  color: 0xff5544,
     read: (s, w, i, c) => (s.ring_temperatures || [])[i] });
   params.push({ id: 'pH',       label: 'pH',          fullName: _HELIX_FULL_NAMES.pH,       min: 2,    max: 12,   color: 0x9966ee,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).pH });
+    read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).pH });
   params.push({ id: 'Eh',       label: 'Eh',          fullName: _HELIX_FULL_NAMES.Eh,       min: -400, max: 800,  color: 0xddee44,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).Eh });
+    read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).Eh });
   params.push({ id: 'salinity', label: 'salinity',    fullName: _HELIX_FULL_NAMES.salinity, min: 0,    max: 30,   color: 0x44ccdd,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).salinity });
+    read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).salinity });
   params.push({ id: 'O2',       label: 'O2',          fullName: _HELIX_FULL_NAMES.O2,       min: 0,    max: 10,   color: 0xaaccff,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).O2 });
+    read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).O2 });
 
   // === HELIX-OVERLAY-FORK ADDITION (Week 3 carbonate) ===============
   // PROPOSAL-CARBONATE-GEOCHEM Phase 1 Week 3 — Carbonate System chips.
@@ -277,7 +329,7 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
   const _F_ORD_N0 = 7;
 
   const _readSI = (mineralId: string) => (s: any, w: any, i: number, c: number) => {
-    const f = (s.ring_fluids || [])[i];
+    const f = _chipFluid(s, w, i, c);
     if (!f) return null;
     const T = (s.ring_temperatures || [])[i];
     const T_use = (typeof T === 'number') ? T : 25;
@@ -289,13 +341,13 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
   params.push({
     id: 'DIC', label: 'DIC', fullName: _HELIX_FULL_NAMES.DIC,
     min: 0, max: 500, color: 0xC9A875,
-    read: (s, w, i, c) => ((s.ring_fluids || [])[i] || {}).CO3,
+    read: (s, w, i, c) => (_chipFluid(s, w, i, c) || {}).CO3,
   });
   params.push({
     id: 'CO2aq', label: 'CO₂', fullName: _HELIX_FULL_NAMES.CO2aq,
     min: 0, max: 500, color: 0xF5E5A0,
     read: (s, w, i, c) => {
-      const f = (s.ring_fluids || [])[i];
+      const f = _chipFluid(s, w, i, c);
       if (!f || typeof f.CO3 !== 'number' || f.CO3 <= 0) return null;
       const T = (s.ring_temperatures || [])[i];
       const T_use = (typeof T === 'number') ? T : 25;
@@ -308,7 +360,7 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
     id: 'HCO3', label: 'HCO₃', fullName: _HELIX_FULL_NAMES.HCO3,
     min: 0, max: 500, color: 0x6B96D9,
     read: (s, w, i, c) => {
-      const f = (s.ring_fluids || [])[i];
+      const f = _chipFluid(s, w, i, c);
       if (!f || typeof f.CO3 !== 'number' || f.CO3 <= 0) return null;
       const T = (s.ring_temperatures || [])[i];
       const T_use = (typeof T === 'number') ? T : 25;
@@ -321,7 +373,7 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
     id: 'CO3_2', label: 'CO₃²⁻', fullName: _HELIX_FULL_NAMES.CO3_2,
     min: 0, max: 50, color: 0x4A7FE0,
     read: (s, w, i, c) => {
-      const f = (s.ring_fluids || [])[i];
+      const f = _chipFluid(s, w, i, c);
       if (!f) return null;
       const T = (s.ring_temperatures || [])[i];
       const T_use = (typeof T === 'number') ? T : 25;
@@ -348,7 +400,7 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
     id: 'SI_HMC', label: 'SI HMC', fullName: _HELIX_FULL_NAMES.SI_HMC,
     min: -3, max: 3, color: 0x9078A0,
     read: (s, w, i, c) => {
-      const f = (s.ring_fluids || [])[i];
+      const f = _chipFluid(s, w, i, c);
       if (!f) return null;
       const T = (s.ring_temperatures || [])[i];
       const T_use = (typeof T === 'number') ? T : 25;
@@ -366,7 +418,7 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
     id: 'pCO2', label: 'pCO₂', fullName: _HELIX_FULL_NAMES.pCO2,
     min: 0, max: 1, color: 0x4DBC5C,
     read: (s, w, i, c) => {
-      const f = (s.ring_fluids || [])[i];
+      const f = _chipFluid(s, w, i, c);
       if (!f) return null;
       const T = (s.ring_temperatures || [])[i];
       const T_use = (typeof T === 'number') ? T : 25;
@@ -414,7 +466,7 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
     params.push({
       id: ionId, label: ionId, fullName, min: mn, max: mx, color,
       read: (s: any, w: any, ri: number, c: number) =>
-        ((s.ring_fluids || [])[ri] || {})[ionId],
+        (_chipFluid(s, w, ri, c) || {})[ionId],
     });
   }
 
