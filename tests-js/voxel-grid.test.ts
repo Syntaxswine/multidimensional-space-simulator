@@ -276,20 +276,113 @@ describe('CavityVoxelGrid — Phase 1 (v158) data model', () => {
       expect(grid.voxelAt(8, 60, 0).fluid.Ca).toBe(before);
     });
 
-    it('interior voxels (d≥1) stay uniform after diffuse (v158 no-op for non-wall slabs)', () => {
+    it('interior voxels (d≥1) stay uniform after diffuse on a uniform grid (Laplacian of a constant is zero)', () => {
       const sim = makeSim();
       const grid = sim.wall_state.voxelGridFor(sim);
-      // Run a few diffusion passes.
+      // Run a few diffusion passes on a fresh (uniform) grid. v160's
+      // _diffuseFull is a real 3D Laplacian, but the Laplacian of a
+      // uniform field is zero — and the per-field variance skip short-
+      // circuits the whole pass — so a freshly-allocated grid (every
+      // voxel at the bulk broth) stays put. (Once engine mass-balance
+      // creates a gradient, diffusion DOES move the interior — see the
+      // v160 radial-replenishment test below.)
       for (let i = 0; i < 5; i++) {
         grid.diffuse(0.05, sim._fluidFieldNames, sim.ring_temperatures);
       }
-      // Sample d=2 at several positions — should all still equal bulk
-      // (v158 never writes to interior voxels and diffuse() doesn't
-      // touch them).
       const bulkCa = sim.conditions.fluid.Ca;
       for (const [r, c] of [[2, 20], [9, 70], [14, 110]]) {
         expect(grid.voxelAt(r, c, 2).fluid.Ca).toBe(bulkCa);
       }
+    });
+  });
+
+  describe('diffuse — v160 real 3D Laplacian (_diffuseFull)', () => {
+    it('radial diffusion replenishes a depleted wall cell from the interior reservoir', () => {
+      const sim = makeSim();
+      const grid = sim.wall_state.voxelGridFor(sim);
+      const r = 8, c = 60;
+      const reservoir = grid.voxelAt(r, c, 1).fluid.Ca;  // d=1 near-wall buffer (= bulk)
+      // Simulate mass-balance consumption: deplete the d=0 wall cell.
+      grid.voxelAt(r, c, 0).fluid.Ca = reservoir * 0.1;
+      const before = grid.voxelAt(r, c, 0).fluid.Ca;
+      for (let i = 0; i < 4; i++) grid.diffuse(0.1, ['Ca'], sim.ring_temperatures);
+      const after = grid.voxelAt(r, c, 0).fluid.Ca;
+      // The wall cell is pulled back up — laterally from neighbor d=0
+      // cells AND radially from the d=1 reservoir — but not all the way
+      // (the gradient relaxes, it doesn't snap).
+      expect(after).toBeGreaterThan(before);
+      expect(after).toBeLessThan(reservoir);
+    });
+
+    it('conserves total mass across a diffuse step (Neumann boundaries everywhere)', () => {
+      const sim = makeSim();
+      const grid = sim.wall_state.voxelGridFor(sim);
+      grid.voxelAt(5, 50, 0).fluid.Ca = 9999;  // perturb one cell
+      const sumCa = () => grid.voxels.reduce((s: number, v: any) => s + (v.fluid ? v.fluid.Ca : 0), 0);
+      const before = sumCa();
+      grid.diffuse(0.1, ['Ca'], sim.ring_temperatures);
+      const after = sumCa();
+      // Discrete Laplacian with symmetric adjacency + matched degree
+      // conserves the sum exactly (modulo float round-off).
+      expect(Math.abs(after - before)).toBeLessThan(1e-6 * before);
+    });
+
+    it('asymmetric stepping: the deep reservoir (d=2) updates only on deep steps (every 4th)', () => {
+      const sim = makeSim();
+      const grid = sim.wall_state.voxelGridFor(sim);
+      const r = 8, c = 60;
+      // Enrich the near-wall buffer (d=1) so there's a d=1↔d=2 gradient.
+      grid.voxelAt(r, c, 1).fluid.Cl = 100;
+      const d2 = () => grid.voxelAt(r, c, 2).fluid.Cl;
+      const v0 = d2();
+      // Call 1 (_diffStep 0 → DEEP): d=2 moves toward d=1.
+      grid.diffuse(0.1, ['Cl'], sim.ring_temperatures);
+      const v1 = d2();
+      expect(v1).not.toBe(v0);
+      // Calls 2-4 (_diffStep 1,2,3 → SHALLOW): d=2 frozen (no flux d1↔d2).
+      grid.diffuse(0.1, ['Cl'], sim.ring_temperatures);
+      grid.diffuse(0.1, ['Cl'], sim.ring_temperatures);
+      grid.diffuse(0.1, ['Cl'], sim.ring_temperatures);
+      expect(d2()).toBe(v1);
+      // Call 5 (_diffStep 4 → DEEP): d=2 moves again.
+      grid.diffuse(0.1, ['Cl'], sim.ring_temperatures);
+      expect(d2()).not.toBe(v1);
+    });
+  });
+
+  describe('strangulation gate — v160 _wallStrangledFor (Putnis 2009 boundary-layer depletion)', () => {
+    it('returns false when the mineral is not supersaturated in bulk (wrong ingredients — byte-neutral)', () => {
+      const sim = makeSim();
+      // mvt broth has no Cu → bulk σ_malachite is 0 → the gate must NOT
+      // engage (it would otherwise skip the engine's substrate-pick RNG
+      // and desync every scenario). This is the byte-identity guarantee.
+      expect(sim._wallStrangledFor('malachite')).toBe(false);
+    });
+
+    it('returns true when bulk favors the mineral but every wall cell is depleted; false once one cell clears', () => {
+      const sim = makeSim();
+      const cond = sim.conditions;
+      // Force the BULK view strongly calcite-supersaturated.
+      cond.fluid.Ca = 5000;
+      cond.fluid.CO3 = 5000;
+      cond.fluid.pH = 8.5;
+      const crit = (globalThis as any).MINERAL_GATES_REGISTRY?.calcite?.sigma_crit;
+      const bulkSigma = cond.supersaturation_calcite();
+      // Guard: this constructed test only means something if the bulk is
+      // above threshold. (It is, for this chemistry — assert so a future
+      // engine change that breaks the premise fails loudly here.)
+      expect(bulkSigma).toBeGreaterThan(crit);
+      // Deplete EVERY wall cell below threshold (Ca/CO3 → 0).
+      const mesh = sim.wall_state.meshFor(sim);
+      for (const cell of mesh.cells) {
+        if (cell && cell.fluid) { cell.fluid.Ca = 0; cell.fluid.CO3 = 0; }
+      }
+      expect(sim._wallStrangledFor('calcite')).toBe(true);
+      // Un-deplete a single cell → that cell clears → no longer strangled.
+      mesh.cells[0].fluid.Ca = 5000;
+      mesh.cells[0].fluid.CO3 = 5000;
+      mesh.cells[0].fluid.pH = 8.5;
+      expect(sim._wallStrangledFor('calcite')).toBe(false);
     });
   });
 

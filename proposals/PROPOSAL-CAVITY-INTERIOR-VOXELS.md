@@ -1,9 +1,16 @@
 # PROPOSAL: Cavity Interior Voxels — 3D fluid tracing inside the vug
 
 **Author:** Claude Opus 4.7 (1M context)
-**Date:** 2026-05-27
-**Status:** DRAFT — living document. Section markers `[FIRM]` / `[OPEN]` indicate which decisions are settled vs. up for revision.
+**Date:** 2026-05-27 (updated 2026-05-28)
+**Status:** IN PROGRESS — living document. Section markers `[FIRM]` / `[OPEN]` indicate which decisions are settled vs. up for revision.
 **Anchor commit:** cabf8ee (v157 — chip reads → mesh.cells)
+
+**Shipping log:**
+- **v158** (Phase 1) — data model + accessors + `diffuse()` delegate. Byte-identical.
+- **v159** (Phase 2a) — `propagateEventDelta` (events reach interior voxels). Byte-identical.
+- **v160** (Phase 2b) — **real per-voxel 3D diffusion** (`_diffuseFull` live, asymmetric stepping per mitigation #2) **+ per-cell nucleation strangulation gate** (`_wallStrangledFor`, Putnis boundary-layer depletion). The coupled geological-behavior change. Baselines drift (regen seed42_v160); growth-side local competition + 3D depletion halos now load-bearing globally; nucleation-side strangulation fires in 4 Pb/Mn-competition scenarios. See js/15-version.ts v160 block for the full drift verification.
+- **Phase 3** (visualization — strip-view radial sub-strips, helicoid depth trails) → now **v161+** (the version numbers shifted because Phase 2 split into 2a/2b).
+- **Phase 4+** (per-scenario re-tune, density-driven settling, per-voxel-T engine reads) → later.
 **Related proposals:** PROPOSAL-CAVITY-MESH.md (wall-side analogue — this is the interior counterpart)
 **Skill compatibility:** none yet. Once Phase 1 lands, the `vugg-tune-scenario` skill will likely need updates to teach future agents about voxel-tunable scenarios.
 

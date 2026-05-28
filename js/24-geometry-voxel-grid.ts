@@ -50,6 +50,21 @@
 // resolution call sampleFluid() with fractional depth.
 const _CAVITY_VOXEL_DEPTH_COUNT = 4;
 
+// v160 (Phase 2b) — asymmetric diffusion stepping cadence. The boundary
+// slabs (d=0 wall + d=1 near-wall buffer) diffuse EVERY step; the deep
+// reservoir (d=2 interior bulk + d=3 center) only every Nth step. This
+// is BOTH a perf optimization (the snapshot + Laplacian skip ~half the
+// voxels on the 3 of every 4 "shallow" steps) AND the correct physics:
+// the proposal's slice semantics say d=3 is "slowest to equilibrate"
+// and PROPOSAL §performance mitigation #2 explicitly blesses
+// "boundary-shell every step, interior-shell every N steps — it's
+// slower in reality anyway." The d1/d2 interface is no-flux (Neumann)
+// on shallow steps, so mass is conserved every step; the deep reservoir
+// just exchanges with the near-wall buffer periodically rather than
+// continuously. Measured: ~8.5 ms/step (all-slab every step) →
+// ~5 ms/step (this cadence), clearing the multi-seed test timeouts.
+const _DIFFUSE_DEEP_EVERY = 4;
+
 interface CavityVoxelLike {
   ringIdx: number;
   cellIdx: number;
@@ -259,14 +274,17 @@ class CavityVoxelGrid {
   diffuse(rate: number, fieldNames: string[], ringTemps?: number[]): void {
     if (!(rate > 0)) return;
     if (!fieldNames || !fieldNames.length) return;
-    // v159 (Phase 2a) — delegate to wall mesh. The d=0 voxel slab IS
-    // the wall (via [FIRM] B alias), so this is the correct diffusion
-    // for the only slab engines read from in v159. v160 will switch
-    // to the per-voxel implementation below.
-    const mesh = this._mesh;
-    if (mesh && typeof mesh.diffuse === 'function') {
-      mesh.diffuse(rate, fieldNames, ringTemps);
-    }
+    // v160 (Phase 2b) — real per-voxel 3D Laplacian. The d=0 slab is
+    // the wall (via [FIRM] B alias) and diffuses with the SAME
+    // lat-long stencil mesh.diffuse used (same c-neighbors, same
+    // Neumann pole clamping, same rate) PLUS a radial neighbor (d=1).
+    // The radial coupling is the load-bearing change: the cavity
+    // interior reservoir (d=1,2,3, carrying event chemistry via
+    // propagateEventDelta) now replenishes wall cells the engines
+    // depleted via mass balance, and depletion halos propagate
+    // radially inward as 3D objects. See _diffuseFull for the
+    // optimized implementation + perf notes.
+    this._diffuseFull(rate, fieldNames, ringTemps);
   }
 
   // v159 prep / v160-ready implementation: real 3D Laplacian across
@@ -303,6 +321,18 @@ class CavityVoxelGrid {
     const total = R * N * D;
     const F = fieldNames.length;
 
+    // Asymmetric stepping (see _DIFFUSE_DEEP_EVERY). dHi is the deepest
+    // slab processed THIS step: on a "deep" step we run the whole column
+    // (dHi = D-1); on the 3-of-4 "shallow" steps we only touch the
+    // boundary slabs (dHi = 1, i.e. d=0 + d=1). Voxels deeper than dHi
+    // are neither snapshotted nor written, and the d=1 radial-outward
+    // neighbor is clamped to Neumann at the d1/d2 interface so the deep
+    // reservoir is frozen (no flux) on shallow steps. Deterministic — no
+    // RNG; the counter is per-grid (per-sim) so runs are reproducible.
+    if (this._diffStep == null) this._diffStep = 0;
+    const deep = (this._diffStep++ % _DIFFUSE_DEEP_EVERY) === 0;
+    const dHi = deep ? (D - 1) : Math.min(1, D - 1);
+
     // Snapshot buffer — pre-allocated and reused across calls to avoid
     // GC pressure (3 MB allocation per step would cripple perf
     // otherwise). Resized lazily if voxel count or field count changes.
@@ -330,6 +360,9 @@ class CavityVoxelGrid {
       fieldMax[k] = -Infinity;
     }
     for (let i = 0; i < total; i++) {
+      // Skip slabs deeper than this step's dHi (i % D === depthIdx). On
+      // shallow steps this skips d=2,d=3 — the bulk of the per-step work.
+      if ((i % D) > dHi) continue;
       const fluid = this.voxels[i].fluid;
       if (!fluid) continue;
       const base = i * F;
@@ -385,7 +418,7 @@ class CavityVoxelGrid {
         const cPrevBase = rBase + cPrev * D;
         const cNextBase = rBase + cNext * D;
         const cBase = rBase + c * D;
-        for (let d = 0; d < D; d++) {
+        for (let d = 0; d <= dHi; d++) {
           const i = cBase + d;
           const fluid = this.voxels[i].fluid;
           if (!fluid) continue;
@@ -401,7 +434,10 @@ class CavityVoxelGrid {
           const nRUp   = (rUpBase >= 0) ? rUpBase + c * D + d : -1;
           const nRDn   = (rDnBase >= 0) ? rDnBase + c * D + d : -1;
           const nDIn   = (d > 0)     ? i - 1 : -1;
-          const nDOut  = (d < D - 1) ? i + 1 : -1;
+          // Radial-outward neighbor clamped to dHi: on shallow steps the
+          // d=1 voxel sees no d=2 neighbor (Neumann no-flux at the d1/d2
+          // interface), freezing the deep reservoir + conserving mass.
+          const nDOut  = (d < dHi)   ? i + 1 : -1;
           let degree = 2; // c-neighbors always present
           if (nRUp  >= 0) degree++;
           if (nRDn  >= 0) degree++;

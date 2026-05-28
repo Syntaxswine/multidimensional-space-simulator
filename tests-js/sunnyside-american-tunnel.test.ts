@@ -148,7 +148,17 @@ describe('Sunnyside-American Tunnel scenario (v105)', () => {
 
     it('the rhodochrosite is pale-pink (Ca-fraction > 0.5 in lattice)', () => {
       const sim = runScenario('sunnyside_american_tunnel');
-      const rhodos = sim.crystals.filter((c: any) => c.mineral === 'rhodochrosite' && c.active);
+      // NOT filtered on `active`: the color note is encoded at growth
+      // time from the local Ca/(Mn+Ca) ratio and persists in the
+      // crystal's zones regardless of whether the crystal is later
+      // enclosed by a neighbor. v160 (per-voxel 3D diffusion) shifted
+      // the seed-42 paragenesis so the headline rhodochrosite happens
+      // to get enclosed by an adjacent galena (a Sweetwater-style
+      // overgrowth — a seed-42 draw; 6 of 8 sampled seeds still leave
+      // rhodochrosite exposed). The test's intent is to verify the
+      // pale-pink COLOR ENCODING, which an enclosed crystal records
+      // just as faithfully as an exposed one.
+      const rhodos = sim.crystals.filter((c: any) => c.mineral === 'rhodochrosite');
       expect(rhodos.length).toBeGreaterThan(0);
       // The rhodochrosite engine's color note: pale pink when
       // Ca/(Mn+Ca) > 0.5. The Stage V broth gives Ca=200+, Mn=30 →
