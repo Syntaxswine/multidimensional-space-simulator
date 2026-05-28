@@ -105,6 +105,51 @@ describe('strip dataset — tensor indexing', () => {
   });
 });
 
+describe('strip dataset — radial depth axis (format_version 2)', () => {
+  // 4D axes: depth_positions = 3 (so strides differ from the 3D case).
+  const axes4 = { steps: 3, angular_indices: 2, height_positions: 4, depth_positions: 3 };
+  const chipCount = 5;
+
+  it('is row-major with depth between height and chip', () => {
+    const i_000 = stripDataIndex(0, 0, 0, 0, axes4, chipCount, 0);
+    const i_chip = stripDataIndex(0, 0, 0, 1, axes4, chipCount, 0);
+    const i_depth = stripDataIndex(0, 0, 0, 0, axes4, chipCount, 1);
+    const i_height = stripDataIndex(0, 0, 1, 0, axes4, chipCount, 0);
+    const i_angle = stripDataIndex(0, 1, 0, 0, axes4, chipCount, 0);
+    const i_step = stripDataIndex(1, 0, 0, 0, axes4, chipCount, 0);
+    const D = axes4.depth_positions;
+    expect(i_chip - i_000).toBe(1);                                   // chip stride = 1
+    expect(i_depth - i_000).toBe(chipCount);                          // depth stride = chipCount
+    expect(i_height - i_000).toBe(D * chipCount);                     // height stride = D*chipCount
+    expect(i_angle - i_000).toBe(axes4.height_positions * D * chipCount);
+    expect(i_step - i_000).toBe(axes4.angular_indices * axes4.height_positions * D * chipCount);
+  });
+
+  it('rejects out-of-range depth', () => {
+    expect(stripDataIndex(0, 0, 0, 0, axes4, chipCount, -1)).toBe(-1);
+    expect(stripDataIndex(0, 0, 0, 0, axes4, chipCount, axes4.depth_positions)).toBe(-1);
+  });
+
+  it('allocates depth_positions × the 3D size', () => {
+    const data = stripAllocateData(axes4, chipCount);
+    expect(data.length).toBe(
+      axes4.steps * axes4.angular_indices * axes4.height_positions * axes4.depth_positions * chipCount,
+    );
+  });
+
+  it('backward-compat: a v1 (no depth_positions) axes collapses to the 3D layout', () => {
+    const axesV1 = { steps: 3, angular_indices: 2, height_positions: 4 };
+    // depth 0 indexes identically to the pre-depth formula...
+    expect(stripDataIndex(1, 1, 2, 3, axesV1 as any, chipCount, 0))
+      .toBe(stripDataIndex(1, 1, 2, 3, axesV1 as any, chipCount));
+    // ...and any depth > 0 is out of range (degenerate single slice).
+    expect(stripDataIndex(0, 0, 0, 0, axesV1 as any, chipCount, 1)).toBe(-1);
+    // allocation matches the 3D size (D treated as 1).
+    expect(stripAllocateData(axesV1 as any, chipCount).length)
+      .toBe(axesV1.steps * axesV1.angular_indices * axesV1.height_positions * chipCount);
+  });
+});
+
 describe('strip dataset — serialization round-trip', () => {
   it('serializes and deserializes without gzip', async () => {
     const manifest = {
@@ -154,10 +199,12 @@ describe('strip recorder — instrumentation', () => {
 
   it('builds a manifest with all helicoid chips', () => {
     const m = recorder.getManifest();
-    expect(m.format_version).toBe(1);
+    expect(m.format_version).toBe(2);  // v2 added the radial depth axis
     expect(m.axes.steps).toBe(5);
     expect(m.axes.angular_indices).toBe(24);
     expect(m.axes.height_positions).toBe(16);
+    // Phase 3: depth axis pulled from the cavity voxel grid (4 slices).
+    expect(m.axes.depth_positions).toBe(4);
     expect(m.chips.length).toBeGreaterThan(40); // 1 wall + 5 special + 11 carbonate + 41 ions
     // System groupings should be populated
     const systems = new Set(m.chips.map((c: any) => c.system));
@@ -179,7 +226,9 @@ describe('strip recorder — instrumentation', () => {
     const ds = recorder.finalize();
     expect(ds.manifest.duration_steps).toBe(2);
     expect(ds.manifest.axes.steps).toBe(2);
-    const expectedSize = 2 * 24 * 16 * ds.manifest.chips.length;
+    // v2: the tensor now carries the depth axis — [step][angle][height][depth][chip].
+    const D = ds.manifest.axes.depth_positions || 1;
+    const expectedSize = 2 * 24 * 16 * D * ds.manifest.chips.length;
     expect(ds.chip_data.length).toBe(expectedSize);
   });
 
@@ -214,5 +263,37 @@ describe('strip recorder — instrumentation', () => {
     const ds = rec3.finalize();
     expect(ds.manifest.duration_steps).toBe(5);
     expect(ds.manifest.axes.steps).toBe(5);
+  });
+
+  // Phase 3: the recorder samples each radial depth slice via the ambient
+  // _setStripChipReadDepth selector → _chipFluid → sim.fluidAtVoxel. Prove
+  // the chain end-to-end: a wall/center Ca contrast must survive into the
+  // recorded tensor at the right depth indices.
+  it('records distinct chemistry across radial depth slices (Phase 3 voxel sampling)', () => {
+    setSeed(42);
+    const scen = SCENARIOS.mvt();
+    const simR = new VugSimulator(scen.conditions, scen.events);
+    const grid = simR.wall_state.voxelGridFor(simR);
+    expect(grid).toBeTruthy();
+    const ring = 8;
+    const N = simR.wall_state.cells_per_ring;
+    // Make the wall slab (d=0) Ca-poor and the center slab (d=3) Ca-rich
+    // across the whole ring, so whichever cell each angle bin samples
+    // sees the same contrast.
+    for (let c = 0; c < N; c++) {
+      grid.voxelAt(ring, c, 0).fluid.Ca = 50;
+      grid.voxelAt(ring, c, 3).fluid.Ca = 5000;
+    }
+    const rec = new StripRecorder(simR, { duration_steps: 1 });
+    rec.captureStep(simR);
+    const ds = rec.finalize();
+    const axes = ds.manifest.axes;
+    const chipCount = ds.manifest.chips.length;
+    const kCa = ds.manifest.chips.findIndex((c: any) => c.id === 'Ca');
+    expect(kCa).toBeGreaterThanOrEqual(0);
+    const wallByte = ds.chip_data[stripDataIndex(0, 0, ring, kCa, axes, chipCount, 0)];
+    const centerByte = ds.chip_data[stripDataIndex(0, 0, ring, kCa, axes, chipCount, 3)];
+    // Center (Ca=5000) quantizes strictly higher than wall (Ca=50).
+    expect(centerByte).toBeGreaterThan(wallByte);
   });
 });

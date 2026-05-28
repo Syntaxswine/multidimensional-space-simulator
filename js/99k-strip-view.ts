@@ -270,6 +270,22 @@ function _ensureStripViewStyles(): void {
       line-height: 1;
     }
     .strip-view-expand-btn:hover { color: #cde; }
+    /* Radial expansion (wall → center depth slices). Same footprint as
+       the angular expand button; tinted teal to read as the "other axis". */
+    .strip-view-radial-btn {
+      width: 16px; height: 12px;
+      background: transparent;
+      border: none;
+      color: #6aa;
+      cursor: pointer;
+      padding: 0;
+      font-size: 10px;
+      line-height: 1;
+    }
+    .strip-view-radial-btn:hover { color: #9dd; }
+    /* The radial container borrows the angular expanded-container layout;
+       a faint teal left-edge marks it as the radial (depth) expansion. */
+    .strip-view-radial-container { box-shadow: inset 2px 0 0 rgba(80,160,160,0.5); }
     .strip-view-favorite-btn {
       width: 14px; height: 14px;
       background: transparent;
@@ -357,25 +373,28 @@ function _stripComputeVarianceLevel(
   return 'green';
 }
 
-// Sample a chip's normalized value (0..1) at one (step, angle, height).
-// If angle is null, returns the MEAN across all angles. Returns null
-// when the value is null/missing.
+// Sample a chip's normalized value (0..1) at one (step, angle, height,
+// depth). If angle is null, returns the MEAN across all angles (at the
+// given depth). depth defaults to 0 (the wall slab); for v1 datasets it
+// must be 0 (stripDataIndex returns -1 otherwise). Returns null when the
+// value is null/missing.
 function _stripSampleChipNormalized(
-  ds: StripDataset, step: number, angle: number | null, height: number, k: number
+  ds: StripDataset, step: number, angle: number | null, height: number, k: number,
+  depth: number = 0
 ): number | null {
   const axes = ds.manifest.axes;
   const chipCount = ds.manifest.chips.length;
   if (angle !== null) {
-    const idx = stripDataIndex(step, angle, height, k, axes, chipCount);
+    const idx = stripDataIndex(step, angle, height, k, axes, chipCount, depth);
     if (idx < 0) return null;
     const b = ds.chip_data[idx];
     if (b === 255) return null;
     return b / 254;
   }
-  // mean across angles
+  // mean across angles (at this depth)
   let sum = 0, count = 0;
   for (let a = 0; a < axes.angular_indices; a++) {
-    const idx = stripDataIndex(step, a, height, k, axes, chipCount);
+    const idx = stripDataIndex(step, a, height, k, axes, chipCount, depth);
     if (idx < 0) continue;
     const b = ds.chip_data[idx];
     if (b === 255) continue;
@@ -403,11 +422,14 @@ function _stripSampleChipNormalized(
 // means chips within 2% of each chip's range bundle together.
 const _STRIP_BUNDLE_TOLERANCE = 0.02;
 
-// Render a single strip (one row OR one angular sub-strip). When
-// `angle` is null, renders the mean across angles (collapsed view).
-// When `angle` is a specific index, renders that one angular slice.
+// Render a single strip (one row OR one angular/radial sub-strip). When
+// `angle` is null, renders the mean across angles (collapsed view). When
+// `angle` is a specific index, renders that one angular slice. `depth`
+// selects the radial slab (0 = wall, depth_count-1 = center); default 0,
+// and for v1 datasets it stays 0.
 function _stripRenderStripSVG(
-  ds: StripDataset, step: number, angle: number | null, width: number, height: number
+  ds: StripDataset, step: number, angle: number | null, width: number, height: number,
+  depth: number = 0
 ): string {
   const axes = ds.manifest.axes;
   const chipCount = ds.manifest.chips.length;
@@ -423,7 +445,7 @@ function _stripRenderStripSVG(
     const meta = ds.manifest.chips[k];
     if (_stripVisibleChips[meta.id] === false) continue;
     for (let h = 0; h < axes.height_positions; h++) {
-      const norm = _stripSampleChipNormalized(ds, step, angle, h, k);
+      const norm = _stripSampleChipNormalized(ds, step, angle, h, k, depth);
       if (norm === null) continue;
       valuesByHeight[h].push({ k, norm });
     }
@@ -550,11 +572,34 @@ function _stripBuildExpandedContainer(ds: StripDataset, step: number, width: num
     `;
     container.appendChild(sub);
   }
-  // v154 (2026-05-26): cross-sub-strip cursor. On mousemove inside any
-  // sub-strip canvas in this expanded container, update the vertical
-  // guide on all 24 sub-strips to the same relative X. Lets the user
-  // compare chip values at the same vug-height position across all
-  // rotation angles in one glance. Per locked v2 design.
+  // v154 (2026-05-26): cross-sub-strip cursor — shared with the radial
+  // container via _stripWireCrossCursor. Hovering at vug-height X on one
+  // sub-strip shows a vertical guide at the same X across all sub-strips
+  // for that time unit. Per locked v2 design.
+  _stripWireCrossCursor(container);
+  return container;
+}
+
+// Depth-slice label for radial sub-strips. The 4-slice scheme's
+// geological semantics (PROPOSAL-CAVITY-INTERIOR-VOXELS [FIRM] A):
+//   d=0 boundary layer (wall) · d=1 near-wall buffer · d=2 interior bulk
+//   · d=3 center baseline. Other slice counts fall back to wall/center
+//   endpoints + a bare index in between.
+function _stripDepthLabel(d: number, depthCount: number): string {
+  if (depthCount === 4) {
+    return ['wall', 'near-wall', 'interior', 'center'][d] || `d${d}`;
+  }
+  if (d === 0) return 'wall';
+  if (d === depthCount - 1) return 'center';
+  return `d${d}`;
+}
+
+// Shared cross-sub-strip cursor wiring (used by both the angular and the
+// radial expanded containers). On mousemove inside any sub-strip canvas,
+// draw a vertical guide at the same relative X across every sub-strip —
+// so the user can compare chip values at one vug-height across all
+// rotation angles (angular) OR all radial depths (radial) at a glance.
+function _stripWireCrossCursor(container: HTMLElement): void {
   container.addEventListener('mousemove', (ev) => {
     const target = ev.target as HTMLElement;
     const canvas = target.closest('.strip-view-substrip-canvas') as HTMLElement | null;
@@ -574,6 +619,38 @@ function _stripBuildExpandedContainer(ds: StripDataset, step: number, width: num
     const cursors = container.querySelectorAll('.strip-view-cursor');
     cursors.forEach((c) => c.classList.remove('is-on'));
   });
+}
+
+// Build the expanded RADIAL sub-strip container for a given step
+// (PROPOSAL-CAVITY-INTERIOR-VOXELS Phase 3). Parallels
+// _stripBuildExpandedContainer but expands along the radial DEPTH axis
+// instead of the angular axis: one sub-strip per stored cavity slice,
+// wall (d=0) at the top → center at the bottom, each rendered as the mean
+// across angles at that depth. Reading top→bottom shows the wall→center
+// chemistry gradient — the depletion halo at the wall vs the replenishing
+// interior reservoir that v160's per-voxel diffusion produces. Only built
+// for format_version-2 datasets (depth_positions > 1).
+function _stripBuildRadialContainer(ds: StripDataset, step: number, _width: number): HTMLElement {
+  const axes = ds.manifest.axes;
+  const depthCount = (axes.depth_positions && axes.depth_positions > 0) ? axes.depth_positions : 1;
+  const container = document.createElement('div');
+  container.className = 'strip-view-expanded-container strip-view-radial-container';
+  for (let d = 0; d < depthCount; d++) {
+    const sub = document.createElement('div');
+    sub.className = 'strip-view-substrip';
+    sub.innerHTML = `
+      <div class="strip-view-substrip-label">
+        <span class="ss-num">d${d}</span>
+        <span class="ss-deg">/ ${_stripDepthLabel(d, depthCount)}</span>
+      </div>
+      <div class="strip-view-substrip-canvas">
+        ${_stripRenderStripSVG(ds, step, null, 1500, 100, d)}
+        <div class="strip-view-cursor"></div>
+      </div>
+    `;
+    container.appendChild(sub);
+  }
+  _stripWireCrossCursor(container);
   return container;
 }
 
@@ -799,6 +876,9 @@ function _stripRenderDataset(bodyEl: HTMLElement, ds: StripDataset): void {
       <div class="strip-view-row-controls">
         <span class="strip-view-variance-dot ${variance === 'green' ? '' : variance}" title="step ${step} — variance: ${variance}"></span>
         <button class="strip-view-expand-btn" data-step="${step}" title="Expand to 24 angular sub-strips">▸</button>
+        ${((ds.manifest.axes.depth_positions || 1) > 1)
+          ? `<button class="strip-view-radial-btn" data-step="${step}" title="Expand to radial sub-strips (wall → center)">⊙</button>`
+          : ''}
         <button class="strip-view-favorite-btn ${isFav ? 'is-on' : ''}" data-step="${step}" title="Favorite step ${step}">★</button>
       </div>
       <div class="strip-view-row-canvas" data-step="${step}">${_stripRenderStepSVG(ds, step, stripW, stripH)}</div>
@@ -852,11 +932,49 @@ function _stripRenderDataset(bodyEl: HTMLElement, ds: StripDataset): void {
         target.textContent = '▸';
         target.setAttribute('title', 'Expand to 24 angular sub-strips');
       } else {
-        // Expand
+        // Expand. Collapse any open radial container first so the two
+        // expansion modes don't stack.
+        const radial = row.querySelector('.strip-view-radial-container');
+        if (radial) {
+          radial.remove();
+          const rbtn = row.querySelector('.strip-view-radial-btn') as HTMLElement | null;
+          if (rbtn) { rbtn.textContent = '⊙'; rbtn.setAttribute('title', 'Expand to radial sub-strips (wall → center)'); }
+        }
         const container = _stripBuildExpandedContainer(ds, step, stripW);
         row.appendChild(container);
         row.classList.add('is-expanded');
         target.textContent = '▾';
+        target.setAttribute('title', 'Collapse');
+      }
+      ev.stopPropagation();
+      return;
+    }
+    if (target.classList.contains('strip-view-radial-btn')) {
+      // PROPOSAL-CAVITY-INTERIOR-VOXELS Phase 3 — radial expansion
+      // (wall → center depth slices). Mirrors the angular expand handler.
+      const step = Number(target.getAttribute('data-step'));
+      if (!Number.isFinite(step)) return;
+      const row = target.closest('.strip-view-row') as HTMLElement;
+      if (!row) return;
+      const existing = row.querySelector('.strip-view-radial-container');
+      if (existing) {
+        existing.remove();
+        // Only drop is-expanded if no angular container remains.
+        if (!row.querySelector('.strip-view-expanded-container')) row.classList.remove('is-expanded');
+        target.textContent = '⊙';
+        target.setAttribute('title', 'Expand to radial sub-strips (wall → center)');
+      } else {
+        // Collapse any open angular container first (don't stack modes).
+        const angular = row.querySelector('.strip-view-expanded-container:not(.strip-view-radial-container)');
+        if (angular) {
+          angular.remove();
+          const ebtn = row.querySelector('.strip-view-expand-btn') as HTMLElement | null;
+          if (ebtn) { ebtn.textContent = '▸'; ebtn.setAttribute('title', 'Expand to 24 angular sub-strips'); }
+        }
+        const container = _stripBuildRadialContainer(ds, step, stripW);
+        row.appendChild(container);
+        row.classList.add('is-expanded');
+        target.textContent = '◉';
         target.setAttribute('title', 'Collapse');
       }
       ev.stopPropagation();

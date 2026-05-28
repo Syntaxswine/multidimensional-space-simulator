@@ -44945,19 +44945,42 @@ Object.assign(VugSimulator.prototype, {
 //      separate field. Serialization for download/share concatenates
 //      them.
 //
-//   4. Time × angle × height × chip indexing — the data tensor is
-//      [step][angle][height][chip] in row-major order. angle ∈
-//      [0, angular_indices), height ∈ [0, height_positions),
-//      chip ∈ [0, chips.length).
+//   4. Time × angle × height × depth × chip indexing — the data tensor
+//      is [step][angle][height][depth][chip] in row-major order. angle ∈
+//      [0, angular_indices), height ∈ [0, height_positions), depth ∈
+//      [0, depth_positions), chip ∈ [0, chips.length).
 //
-// SIZE ESTIMATES (typical 200-step × 24 × 16 × 58 dataset):
-//   raw uint8:              200 × 24 × 16 × 58 = 4.45 MB
+//      DEPTH AXIS (format_version 2, PROPOSAL-CAVITY-INTERIOR-VOXELS
+//      Phase 3): the radial dimension of the cavity. depth 0 is the wall
+//      (= the d=0 boundary voxel, aliased to the wall mesh cell — what
+//      format_version 1 recorded), and depth_positions-1 is the cavity
+//      center. The recorder samples the CavityVoxelGrid's stored slices
+//      (default 4: boundary / near-wall / interior / center) so the
+//      viewer can render radial sub-strips showing the wall→center
+//      chemistry gradient — the depletion halos + reservoir replenishment
+//      that v160's per-voxel diffusion produces.
+//
+//      BACKWARD COMPATIBILITY: format_version-1 datasets have no
+//      depth_positions in their axes. stripDataIndex / stripAllocateData
+//      treat a missing-or-1 depth_positions as the degenerate 1-slice
+//      case, in which the 4D index formula collapses EXACTLY to the old
+//      3D formula. So v1 datasets load + render unchanged, and the same
+//      code path serves both.
+//
+// SIZE ESTIMATES (typical 200-step × 24 × 16 × 4 × 58 dataset):
+//   raw uint8:              200 × 24 × 16 × 4 × 58 = 17.8 MB
 //   + manifest + events:    ~5 KB
-//   after gzip:             ~800 KB - 1.5 MB
+//   after gzip:             ~1.5 - 3 MB (interior slices are largely
+//                           uniform — long byte runs compress well, so
+//                           the depth axis costs far less than 4× gzipped)
+//   (format_version-1, depth-collapsed: 1/4 of the above)
 //
 // ============================================================
 // === HELIX-OVERLAY-FORK ADDITION (strip view bedrock, v149+) =========
-const _STRIP_FORMAT_VERSION = 1;
+// format_version 2 (2026-05-28): added the depth axis (radial sub-strips).
+// v1 datasets (no depth_positions) still load — see the backward-compat
+// note above.
+const _STRIP_FORMAT_VERSION = 2;
 const _STRIP_NULL_BYTE = 255; // reserved value meaning "no data"
 const _STRIP_MAX_DATA_BYTE = 254; // chip values map to [0, 254]
 // ============================================================
@@ -44998,20 +45021,30 @@ function stripDequantizeNormalized(byte) {
 // ============================================================
 // Tensor indexing
 // ============================================================
-// Linear index into the [step][angle][height][chip] row-major chip_data
-// array. Validates bounds and returns -1 if out of range.
-function stripDataIndex(step, angle, height, chip, axes, chip_count) {
+// Linear index into the [step][angle][height][depth][chip] row-major
+// chip_data array. Validates bounds and returns -1 if out of range.
+//
+// `depth` is a TRAILING optional param (default 0) so every pre-depth
+// caller keeps working untouched. With depth_positions absent-or-1 the
+// formula collapses to the original 3D layout (depth must be 0, and the
+// D=1 strides equal the old strides), so format_version-1 datasets index
+// identically. New (v2) callers pass depth ∈ [0, depth_positions).
+function stripDataIndex(step, angle, height, chip, axes, chip_count, depth = 0) {
+    const D = (axes.depth_positions && axes.depth_positions > 0) ? axes.depth_positions : 1;
     if (step < 0 || step >= axes.steps)
         return -1;
     if (angle < 0 || angle >= axes.angular_indices)
         return -1;
     if (height < 0 || height >= axes.height_positions)
         return -1;
+    if (depth < 0 || depth >= D)
+        return -1;
     if (chip < 0 || chip >= chip_count)
         return -1;
-    return (step * axes.angular_indices * axes.height_positions * chip_count +
-        angle * axes.height_positions * chip_count +
-        height * chip_count +
+    return (step * axes.angular_indices * axes.height_positions * D * chip_count +
+        angle * axes.height_positions * D * chip_count +
+        height * D * chip_count +
+        depth * chip_count +
         chip);
 }
 // Allocate a freshly-zeroed chip_data tensor for the given dimensions.
@@ -45019,7 +45052,8 @@ function stripDataIndex(step, angle, height, chip, axes, chip_count) {
 // The recorder is responsible for filling every byte; if it skips one,
 // it should explicitly write _STRIP_NULL_BYTE.
 function stripAllocateData(axes, chip_count) {
-    const total = axes.steps * axes.angular_indices * axes.height_positions * chip_count;
+    const D = (axes.depth_positions && axes.depth_positions > 0) ? axes.depth_positions : 1;
+    const total = axes.steps * axes.angular_indices * axes.height_positions * D * chip_count;
     return new Uint8Array(total);
 }
 // ============================================================
@@ -45189,6 +45223,21 @@ class StripRecorder {
         const angular_indices = Math.max(1, Math.floor(Number(o.angular_indices ?? _STRIP_DEFAULT_ANGULAR_INDICES)));
         const cells_per_ring = Math.max(1, Number(wall?.cells_per_ring) || 120);
         const steps = Math.max(1, Math.floor(Number(o.duration_steps) || sim?.conditions?._scenario?.duration_steps || 100));
+        // Phase 3 radial depth axis (PROPOSAL-CAVITY-INTERIOR-VOXELS). Read
+        // the cavity voxel grid's slice count (4: boundary/near-wall/interior/
+        // center). If the grid isn't available (headless harness, or a build
+        // without CavityVoxelGrid), fall back to 1 — a depth-collapsed,
+        // wall-only recording that's format-compatible with format_version 1.
+        let depth_positions = 1;
+        try {
+            const grid = (wall && typeof wall.voxelGridFor === 'function')
+                ? wall.voxelGridFor(sim) : null;
+            if (grid && grid.depth_count > 0)
+                depth_positions = grid.depth_count | 0;
+        }
+        catch (_e) {
+            depth_positions = 1;
+        }
         // Precompute angle → midpoint native cell.
         this.cellForAngle = new Array(angular_indices);
         const binSize = cells_per_ring / angular_indices;
@@ -45196,13 +45245,13 @@ class StripRecorder {
             this.cellForAngle[a] = Math.floor(a * binSize + binSize / 2) % cells_per_ring;
         }
         this.manifest = {
-            format_version: 1,
+            format_version: 2,
             sim_version: Number((sim && sim.SIM_VERSION) || (typeof SIM_VERSION !== 'undefined' ? SIM_VERSION : 0)),
             scenario_id: String(sim?.conditions?._scenario?.id || sim?.conditions?._scenario_id || 'unknown'),
             seed: Number(sim?._seed || 42),
             recorded_at: Date.now(),
             duration_steps: steps,
-            axes: { steps, angular_indices, height_positions },
+            axes: { steps, angular_indices, height_positions, depth_positions },
             chips,
             notes: o.notes,
         };
@@ -45258,7 +45307,8 @@ class StripRecorder {
         const newSteps = oldSteps * 2;
         const chipCount = this.manifest.chips.length;
         const newAxes = { ...this.manifest.axes, steps: newSteps };
-        const newSize = newSteps * newAxes.angular_indices * newAxes.height_positions * chipCount;
+        const D = (newAxes.depth_positions && newAxes.depth_positions > 0) ? newAxes.depth_positions : 1;
+        const newSize = newSteps * newAxes.angular_indices * newAxes.height_positions * D * chipCount;
         const grown = new Uint8Array(newSize);
         grown.set(this.chipData); // preserve existing data
         this.chipData = grown;
@@ -45278,35 +45328,51 @@ class StripRecorder {
         const axes = this.manifest.axes;
         const chipCount = this.manifest.chips.length;
         const chips = this.chipsRuntime;
-        // Walk (angle, height, chip). For each chip, call its runtime read
-        // with the representative cell for that angle.
+        // Walk (angle, height, depth, chip). For each chip, call its runtime
+        // read with the representative cell for that angle. The depth axis
+        // (Phase 3) is driven via the ambient _setStripChipReadDepth selector
+        // in 99j: setting it before the chip-k loop makes _chipFluid pull the
+        // voxel grid's interior slice (depth 0 = wall, depth_count-1 = center).
+        // Depth-invariant chips (wall geometry, per-ring temperature, global
+        // f_ord) return the same value at every depth — recorded redundantly
+        // (gzip-friendly: long identical byte runs) rather than special-cased.
+        const depthPositions = (axes.depth_positions && axes.depth_positions > 0) ? axes.depth_positions : 1;
+        const hasDepthSetter = (typeof _setStripChipReadDepth === 'function');
         for (let a = 0; a < axes.angular_indices; a++) {
             const cellIdx = this.cellForAngle[a];
             for (let h = 0; h < axes.height_positions; h++) {
-                for (let k = 0; k < chipCount; k++) {
-                    const p = chips[k];
-                    if (!p || typeof p.read !== 'function') {
-                        // Missing runtime entry — record null.
-                        const idx = stripDataIndex(step, a, h, k, axes, chipCount);
+                for (let d = 0; d < depthPositions; d++) {
+                    if (hasDepthSetter)
+                        _setStripChipReadDepth(d);
+                    for (let k = 0; k < chipCount; k++) {
+                        const p = chips[k];
+                        if (!p || typeof p.read !== 'function') {
+                            // Missing runtime entry — record null.
+                            const idx = stripDataIndex(step, a, h, k, axes, chipCount, d);
+                            if (idx >= 0)
+                                this.chipData[idx] = 255; // _STRIP_NULL_BYTE
+                            continue;
+                        }
+                        let val;
+                        try {
+                            val = p.read(sim, wall, h, cellIdx);
+                        }
+                        catch (_err) {
+                            val = null;
+                        }
+                        const meta = this.manifest.chips[k];
+                        const byte = stripQuantize(val, meta.range[0], meta.range[1]);
+                        const idx = stripDataIndex(step, a, h, k, axes, chipCount, d);
                         if (idx >= 0)
-                            this.chipData[idx] = 255; // _STRIP_NULL_BYTE
-                        continue;
+                            this.chipData[idx] = byte;
                     }
-                    let val;
-                    try {
-                        val = p.read(sim, wall, h, cellIdx);
-                    }
-                    catch (_err) {
-                        val = null;
-                    }
-                    const meta = this.manifest.chips[k];
-                    const byte = stripQuantize(val, meta.range[0], meta.range[1]);
-                    const idx = stripDataIndex(step, a, h, k, axes, chipCount);
-                    if (idx >= 0)
-                        this.chipData[idx] = byte;
                 }
             }
         }
+        // Reset the ambient depth so nothing else (live helicoid, other
+        // consumers) sees a stale interior-slice selector.
+        if (hasDepthSetter)
+            _setStripChipReadDepth(0);
         // Capture nucleation events from this step. Crystals carry
         // nucleation_step + wall_anchor.{ringIdx, cellIdx}, so we just
         // walk the newly-added tail of sim.crystals.
@@ -45346,7 +45412,8 @@ class StripRecorder {
             const actual = this.capturedSteps;
             const chipCount = this.manifest.chips.length;
             const oldAxes = this.manifest.axes;
-            const newSize = actual * oldAxes.angular_indices * oldAxes.height_positions * chipCount;
+            const D = (oldAxes.depth_positions && oldAxes.depth_positions > 0) ? oldAxes.depth_positions : 1;
+            const newSize = actual * oldAxes.angular_indices * oldAxes.height_positions * D * chipCount;
             const trimmed = this.chipData.slice(0, newSize);
             this.manifest = {
                 ...this.manifest,
@@ -65355,6 +65422,19 @@ const _HELIX_FULL_NAMES = {
     f_ord: 'Dolomite ordering fraction (Kim 2023; 0=disordered, 1=ordered)',
     // === END HELIX-OVERLAY-FORK ADDITION ==============================
 };
+// PROPOSAL-CAVITY-INTERIOR-VOXELS Phase 3 — ambient radial-depth selector
+// for chip reads. The strip recorder sets this (via _setStripChipReadDepth)
+// before each radial-slice pass — depth 0 = wall, depth_count-1 = cavity
+// center — so _chipFluid pulls from the CavityVoxelGrid's interior voxels
+// instead of the d=0 wall cell, WITHOUT threading a depth param through
+// every (non-uniform) chip read signature. Mirrors the conditions.fluid
+// swap idiom in _runEngineForCrystal: set it, run the synchronous reads,
+// reset to 0. Default 0 = wall = the live helicoid's behavior, which never
+// touches this (so the live trail + replay paths are unaffected).
+let _stripChipReadDepth = 0;
+function _setStripChipReadDepth(d) {
+    _stripChipReadDepth = (typeof d === 'number' && d > 0) ? (d | 0) : 0;
+}
 const _HELIX_CHEM_PARAMS = (function () {
     const params = [];
     // ---- per-cell read helper (v157, 2026-05-27) -----------------------
@@ -65398,6 +65478,16 @@ const _HELIX_CHEM_PARAMS = (function () {
     // to head that way for ages" — explicit architectural direction, not
     // just bug-fix scope.
     const _chipFluid = (s, w, ri, c) => {
+        // Phase 3 radial depth: when the recorder is sampling an interior
+        // slice (_stripChipReadDepth > 0), pull the voxel grid's fluid object
+        // at that depth. depth 0 falls through to the wall (d=0) path below —
+        // identical to pre-Phase-3 behavior, since the d=0 voxel IS the wall
+        // mesh cell via the [FIRM] B alias.
+        if (_stripChipReadDepth > 0 && s && typeof s.fluidAtVoxel === 'function') {
+            const vf = s.fluidAtVoxel(ri, c | 0, _stripChipReadDepth);
+            if (vf)
+                return vf;
+        }
         if (w && typeof w.meshFor === 'function') {
             const mesh = w.meshFor(s);
             if (mesh && mesh.cells) {
@@ -67175,6 +67265,22 @@ function _ensureStripViewStyles() {
       line-height: 1;
     }
     .strip-view-expand-btn:hover { color: #cde; }
+    /* Radial expansion (wall → center depth slices). Same footprint as
+       the angular expand button; tinted teal to read as the "other axis". */
+    .strip-view-radial-btn {
+      width: 16px; height: 12px;
+      background: transparent;
+      border: none;
+      color: #6aa;
+      cursor: pointer;
+      padding: 0;
+      font-size: 10px;
+      line-height: 1;
+    }
+    .strip-view-radial-btn:hover { color: #9dd; }
+    /* The radial container borrows the angular expanded-container layout;
+       a faint teal left-edge marks it as the radial (depth) expansion. */
+    .strip-view-radial-container { box-shadow: inset 2px 0 0 rgba(80,160,160,0.5); }
     .strip-view-favorite-btn {
       width: 14px; height: 14px;
       background: transparent;
@@ -67264,14 +67370,16 @@ function _stripComputeVarianceLevel(ds, step) {
         return 'yellow';
     return 'green';
 }
-// Sample a chip's normalized value (0..1) at one (step, angle, height).
-// If angle is null, returns the MEAN across all angles. Returns null
-// when the value is null/missing.
-function _stripSampleChipNormalized(ds, step, angle, height, k) {
+// Sample a chip's normalized value (0..1) at one (step, angle, height,
+// depth). If angle is null, returns the MEAN across all angles (at the
+// given depth). depth defaults to 0 (the wall slab); for v1 datasets it
+// must be 0 (stripDataIndex returns -1 otherwise). Returns null when the
+// value is null/missing.
+function _stripSampleChipNormalized(ds, step, angle, height, k, depth = 0) {
     const axes = ds.manifest.axes;
     const chipCount = ds.manifest.chips.length;
     if (angle !== null) {
-        const idx = stripDataIndex(step, angle, height, k, axes, chipCount);
+        const idx = stripDataIndex(step, angle, height, k, axes, chipCount, depth);
         if (idx < 0)
             return null;
         const b = ds.chip_data[idx];
@@ -67279,10 +67387,10 @@ function _stripSampleChipNormalized(ds, step, angle, height, k) {
             return null;
         return b / 254;
     }
-    // mean across angles
+    // mean across angles (at this depth)
     let sum = 0, count = 0;
     for (let a = 0; a < axes.angular_indices; a++) {
-        const idx = stripDataIndex(step, a, height, k, axes, chipCount);
+        const idx = stripDataIndex(step, a, height, k, axes, chipCount, depth);
         if (idx < 0)
             continue;
         const b = ds.chip_data[idx];
@@ -67312,10 +67420,12 @@ function _stripSampleChipNormalized(ds, step, angle, height, k) {
 // _STRIP_BUNDLE_TOLERANCE is in normalized chip units (0..1). 0.02
 // means chips within 2% of each chip's range bundle together.
 const _STRIP_BUNDLE_TOLERANCE = 0.02;
-// Render a single strip (one row OR one angular sub-strip). When
-// `angle` is null, renders the mean across angles (collapsed view).
-// When `angle` is a specific index, renders that one angular slice.
-function _stripRenderStripSVG(ds, step, angle, width, height) {
+// Render a single strip (one row OR one angular/radial sub-strip). When
+// `angle` is null, renders the mean across angles (collapsed view). When
+// `angle` is a specific index, renders that one angular slice. `depth`
+// selects the radial slab (0 = wall, depth_count-1 = center); default 0,
+// and for v1 datasets it stays 0.
+function _stripRenderStripSVG(ds, step, angle, width, height, depth = 0) {
     const axes = ds.manifest.axes;
     const chipCount = ds.manifest.chips.length;
     const segs = [];
@@ -67331,7 +67441,7 @@ function _stripRenderStripSVG(ds, step, angle, width, height) {
         if (_stripVisibleChips[meta.id] === false)
             continue;
         for (let h = 0; h < axes.height_positions; h++) {
-            const norm = _stripSampleChipNormalized(ds, step, angle, h, k);
+            const norm = _stripSampleChipNormalized(ds, step, angle, h, k, depth);
             if (norm === null)
                 continue;
             valuesByHeight[h].push({ k, norm });
@@ -67455,11 +67565,34 @@ function _stripBuildExpandedContainer(ds, step, width) {
     `;
         container.appendChild(sub);
     }
-    // v154 (2026-05-26): cross-sub-strip cursor. On mousemove inside any
-    // sub-strip canvas in this expanded container, update the vertical
-    // guide on all 24 sub-strips to the same relative X. Lets the user
-    // compare chip values at the same vug-height position across all
-    // rotation angles in one glance. Per locked v2 design.
+    // v154 (2026-05-26): cross-sub-strip cursor — shared with the radial
+    // container via _stripWireCrossCursor. Hovering at vug-height X on one
+    // sub-strip shows a vertical guide at the same X across all sub-strips
+    // for that time unit. Per locked v2 design.
+    _stripWireCrossCursor(container);
+    return container;
+}
+// Depth-slice label for radial sub-strips. The 4-slice scheme's
+// geological semantics (PROPOSAL-CAVITY-INTERIOR-VOXELS [FIRM] A):
+//   d=0 boundary layer (wall) · d=1 near-wall buffer · d=2 interior bulk
+//   · d=3 center baseline. Other slice counts fall back to wall/center
+//   endpoints + a bare index in between.
+function _stripDepthLabel(d, depthCount) {
+    if (depthCount === 4) {
+        return ['wall', 'near-wall', 'interior', 'center'][d] || `d${d}`;
+    }
+    if (d === 0)
+        return 'wall';
+    if (d === depthCount - 1)
+        return 'center';
+    return `d${d}`;
+}
+// Shared cross-sub-strip cursor wiring (used by both the angular and the
+// radial expanded containers). On mousemove inside any sub-strip canvas,
+// draw a vertical guide at the same relative X across every sub-strip —
+// so the user can compare chip values at one vug-height across all
+// rotation angles (angular) OR all radial depths (radial) at a glance.
+function _stripWireCrossCursor(container) {
     container.addEventListener('mousemove', (ev) => {
         const target = ev.target;
         const canvas = target.closest('.strip-view-substrip-canvas');
@@ -67481,6 +67614,37 @@ function _stripBuildExpandedContainer(ds, step, width) {
         const cursors = container.querySelectorAll('.strip-view-cursor');
         cursors.forEach((c) => c.classList.remove('is-on'));
     });
+}
+// Build the expanded RADIAL sub-strip container for a given step
+// (PROPOSAL-CAVITY-INTERIOR-VOXELS Phase 3). Parallels
+// _stripBuildExpandedContainer but expands along the radial DEPTH axis
+// instead of the angular axis: one sub-strip per stored cavity slice,
+// wall (d=0) at the top → center at the bottom, each rendered as the mean
+// across angles at that depth. Reading top→bottom shows the wall→center
+// chemistry gradient — the depletion halo at the wall vs the replenishing
+// interior reservoir that v160's per-voxel diffusion produces. Only built
+// for format_version-2 datasets (depth_positions > 1).
+function _stripBuildRadialContainer(ds, step, _width) {
+    const axes = ds.manifest.axes;
+    const depthCount = (axes.depth_positions && axes.depth_positions > 0) ? axes.depth_positions : 1;
+    const container = document.createElement('div');
+    container.className = 'strip-view-expanded-container strip-view-radial-container';
+    for (let d = 0; d < depthCount; d++) {
+        const sub = document.createElement('div');
+        sub.className = 'strip-view-substrip';
+        sub.innerHTML = `
+      <div class="strip-view-substrip-label">
+        <span class="ss-num">d${d}</span>
+        <span class="ss-deg">/ ${_stripDepthLabel(d, depthCount)}</span>
+      </div>
+      <div class="strip-view-substrip-canvas">
+        ${_stripRenderStripSVG(ds, step, null, 1500, 100, d)}
+        <div class="strip-view-cursor"></div>
+      </div>
+    `;
+        container.appendChild(sub);
+    }
+    _stripWireCrossCursor(container);
     return container;
 }
 // Build / refresh the dataset list view.
@@ -67710,6 +67874,9 @@ function _stripRenderDataset(bodyEl, ds) {
       <div class="strip-view-row-controls">
         <span class="strip-view-variance-dot ${variance === 'green' ? '' : variance}" title="step ${step} — variance: ${variance}"></span>
         <button class="strip-view-expand-btn" data-step="${step}" title="Expand to 24 angular sub-strips">▸</button>
+        ${((ds.manifest.axes.depth_positions || 1) > 1)
+            ? `<button class="strip-view-radial-btn" data-step="${step}" title="Expand to radial sub-strips (wall → center)">⊙</button>`
+            : ''}
         <button class="strip-view-favorite-btn ${isFav ? 'is-on' : ''}" data-step="${step}" title="Favorite step ${step}">★</button>
       </div>
       <div class="strip-view-row-canvas" data-step="${step}">${_stripRenderStepSVG(ds, step, stripW, stripH)}</div>
@@ -67769,11 +67936,59 @@ function _stripRenderDataset(bodyEl, ds) {
                 target.setAttribute('title', 'Expand to 24 angular sub-strips');
             }
             else {
-                // Expand
+                // Expand. Collapse any open radial container first so the two
+                // expansion modes don't stack.
+                const radial = row.querySelector('.strip-view-radial-container');
+                if (radial) {
+                    radial.remove();
+                    const rbtn = row.querySelector('.strip-view-radial-btn');
+                    if (rbtn) {
+                        rbtn.textContent = '⊙';
+                        rbtn.setAttribute('title', 'Expand to radial sub-strips (wall → center)');
+                    }
+                }
                 const container = _stripBuildExpandedContainer(ds, step, stripW);
                 row.appendChild(container);
                 row.classList.add('is-expanded');
                 target.textContent = '▾';
+                target.setAttribute('title', 'Collapse');
+            }
+            ev.stopPropagation();
+            return;
+        }
+        if (target.classList.contains('strip-view-radial-btn')) {
+            // PROPOSAL-CAVITY-INTERIOR-VOXELS Phase 3 — radial expansion
+            // (wall → center depth slices). Mirrors the angular expand handler.
+            const step = Number(target.getAttribute('data-step'));
+            if (!Number.isFinite(step))
+                return;
+            const row = target.closest('.strip-view-row');
+            if (!row)
+                return;
+            const existing = row.querySelector('.strip-view-radial-container');
+            if (existing) {
+                existing.remove();
+                // Only drop is-expanded if no angular container remains.
+                if (!row.querySelector('.strip-view-expanded-container'))
+                    row.classList.remove('is-expanded');
+                target.textContent = '⊙';
+                target.setAttribute('title', 'Expand to radial sub-strips (wall → center)');
+            }
+            else {
+                // Collapse any open angular container first (don't stack modes).
+                const angular = row.querySelector('.strip-view-expanded-container:not(.strip-view-radial-container)');
+                if (angular) {
+                    angular.remove();
+                    const ebtn = row.querySelector('.strip-view-expand-btn');
+                    if (ebtn) {
+                        ebtn.textContent = '▸';
+                        ebtn.setAttribute('title', 'Expand to 24 angular sub-strips');
+                    }
+                }
+                const container = _stripBuildRadialContainer(ds, step, stripW);
+                row.appendChild(container);
+                row.classList.add('is-expanded');
+                target.textContent = '◉';
                 target.setAttribute('title', 'Collapse');
             }
             ev.stopPropagation();

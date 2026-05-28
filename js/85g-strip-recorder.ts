@@ -126,6 +126,18 @@ class StripRecorder {
     const cells_per_ring = Math.max(1, Number(wall?.cells_per_ring) || 120);
     const steps = Math.max(1, Math.floor(Number(o.duration_steps) || sim?.conditions?._scenario?.duration_steps || 100));
 
+    // Phase 3 radial depth axis (PROPOSAL-CAVITY-INTERIOR-VOXELS). Read
+    // the cavity voxel grid's slice count (4: boundary/near-wall/interior/
+    // center). If the grid isn't available (headless harness, or a build
+    // without CavityVoxelGrid), fall back to 1 — a depth-collapsed,
+    // wall-only recording that's format-compatible with format_version 1.
+    let depth_positions = 1;
+    try {
+      const grid = (wall && typeof wall.voxelGridFor === 'function')
+        ? wall.voxelGridFor(sim) : null;
+      if (grid && grid.depth_count > 0) depth_positions = grid.depth_count | 0;
+    } catch (_e) { depth_positions = 1; }
+
     // Precompute angle → midpoint native cell.
     this.cellForAngle = new Array(angular_indices);
     const binSize = cells_per_ring / angular_indices;
@@ -134,13 +146,13 @@ class StripRecorder {
     }
 
     this.manifest = {
-      format_version: 1,
+      format_version: 2,
       sim_version: Number((sim && sim.SIM_VERSION) || (typeof SIM_VERSION !== 'undefined' ? SIM_VERSION : 0)),
       scenario_id: String(sim?.conditions?._scenario?.id || sim?.conditions?._scenario_id || 'unknown'),
       seed: Number(sim?._seed || 42),
       recorded_at: Date.now(),
       duration_steps: steps,
-      axes: { steps, angular_indices, height_positions },
+      axes: { steps, angular_indices, height_positions, depth_positions },
       chips,
       notes: o.notes,
     };
@@ -191,7 +203,8 @@ class StripRecorder {
     const newSteps = oldSteps * 2;
     const chipCount = this.manifest.chips.length;
     const newAxes = { ...this.manifest.axes, steps: newSteps };
-    const newSize = newSteps * newAxes.angular_indices * newAxes.height_positions * chipCount;
+    const D = (newAxes.depth_positions && newAxes.depth_positions > 0) ? newAxes.depth_positions : 1;
+    const newSize = newSteps * newAxes.angular_indices * newAxes.height_positions * D * chipCount;
     const grown = new Uint8Array(newSize);
     grown.set(this.chipData);  // preserve existing data
     this.chipData = grown;
@@ -213,32 +226,46 @@ class StripRecorder {
     const chipCount = this.manifest.chips.length;
     const chips = this.chipsRuntime;
 
-    // Walk (angle, height, chip). For each chip, call its runtime read
-    // with the representative cell for that angle.
+    // Walk (angle, height, depth, chip). For each chip, call its runtime
+    // read with the representative cell for that angle. The depth axis
+    // (Phase 3) is driven via the ambient _setStripChipReadDepth selector
+    // in 99j: setting it before the chip-k loop makes _chipFluid pull the
+    // voxel grid's interior slice (depth 0 = wall, depth_count-1 = center).
+    // Depth-invariant chips (wall geometry, per-ring temperature, global
+    // f_ord) return the same value at every depth — recorded redundantly
+    // (gzip-friendly: long identical byte runs) rather than special-cased.
+    const depthPositions = (axes.depth_positions && axes.depth_positions > 0) ? axes.depth_positions : 1;
+    const hasDepthSetter = (typeof _setStripChipReadDepth === 'function');
     for (let a = 0; a < axes.angular_indices; a++) {
       const cellIdx = this.cellForAngle[a];
       for (let h = 0; h < axes.height_positions; h++) {
-        for (let k = 0; k < chipCount; k++) {
-          const p = chips[k];
-          if (!p || typeof p.read !== 'function') {
-            // Missing runtime entry — record null.
-            const idx = stripDataIndex(step, a, h, k, axes, chipCount);
-            if (idx >= 0) this.chipData[idx] = 255; // _STRIP_NULL_BYTE
-            continue;
+        for (let d = 0; d < depthPositions; d++) {
+          if (hasDepthSetter) _setStripChipReadDepth(d);
+          for (let k = 0; k < chipCount; k++) {
+            const p = chips[k];
+            if (!p || typeof p.read !== 'function') {
+              // Missing runtime entry — record null.
+              const idx = stripDataIndex(step, a, h, k, axes, chipCount, d);
+              if (idx >= 0) this.chipData[idx] = 255; // _STRIP_NULL_BYTE
+              continue;
+            }
+            let val: any;
+            try {
+              val = p.read(sim, wall, h, cellIdx);
+            } catch (_err) {
+              val = null;
+            }
+            const meta = this.manifest.chips[k];
+            const byte = stripQuantize(val, meta.range[0], meta.range[1]);
+            const idx = stripDataIndex(step, a, h, k, axes, chipCount, d);
+            if (idx >= 0) this.chipData[idx] = byte;
           }
-          let val: any;
-          try {
-            val = p.read(sim, wall, h, cellIdx);
-          } catch (_err) {
-            val = null;
-          }
-          const meta = this.manifest.chips[k];
-          const byte = stripQuantize(val, meta.range[0], meta.range[1]);
-          const idx = stripDataIndex(step, a, h, k, axes, chipCount);
-          if (idx >= 0) this.chipData[idx] = byte;
         }
       }
     }
+    // Reset the ambient depth so nothing else (live helicoid, other
+    // consumers) sees a stale interior-slice selector.
+    if (hasDepthSetter) _setStripChipReadDepth(0);
 
     // Capture nucleation events from this step. Crystals carry
     // nucleation_step + wall_anchor.{ringIdx, cellIdx}, so we just
@@ -281,7 +308,8 @@ class StripRecorder {
       const actual = this.capturedSteps;
       const chipCount = this.manifest.chips.length;
       const oldAxes = this.manifest.axes;
-      const newSize = actual * oldAxes.angular_indices * oldAxes.height_positions * chipCount;
+      const D = (oldAxes.depth_positions && oldAxes.depth_positions > 0) ? oldAxes.depth_positions : 1;
+      const newSize = actual * oldAxes.angular_indices * oldAxes.height_positions * D * chipCount;
       const trimmed = this.chipData.slice(0, newSize);
       this.manifest = {
         ...this.manifest,

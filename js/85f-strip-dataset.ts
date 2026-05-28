@@ -36,21 +36,44 @@
 //      separate field. Serialization for download/share concatenates
 //      them.
 //
-//   4. Time × angle × height × chip indexing — the data tensor is
-//      [step][angle][height][chip] in row-major order. angle ∈
-//      [0, angular_indices), height ∈ [0, height_positions),
-//      chip ∈ [0, chips.length).
+//   4. Time × angle × height × depth × chip indexing — the data tensor
+//      is [step][angle][height][depth][chip] in row-major order. angle ∈
+//      [0, angular_indices), height ∈ [0, height_positions), depth ∈
+//      [0, depth_positions), chip ∈ [0, chips.length).
 //
-// SIZE ESTIMATES (typical 200-step × 24 × 16 × 58 dataset):
-//   raw uint8:              200 × 24 × 16 × 58 = 4.45 MB
+//      DEPTH AXIS (format_version 2, PROPOSAL-CAVITY-INTERIOR-VOXELS
+//      Phase 3): the radial dimension of the cavity. depth 0 is the wall
+//      (= the d=0 boundary voxel, aliased to the wall mesh cell — what
+//      format_version 1 recorded), and depth_positions-1 is the cavity
+//      center. The recorder samples the CavityVoxelGrid's stored slices
+//      (default 4: boundary / near-wall / interior / center) so the
+//      viewer can render radial sub-strips showing the wall→center
+//      chemistry gradient — the depletion halos + reservoir replenishment
+//      that v160's per-voxel diffusion produces.
+//
+//      BACKWARD COMPATIBILITY: format_version-1 datasets have no
+//      depth_positions in their axes. stripDataIndex / stripAllocateData
+//      treat a missing-or-1 depth_positions as the degenerate 1-slice
+//      case, in which the 4D index formula collapses EXACTLY to the old
+//      3D formula. So v1 datasets load + render unchanged, and the same
+//      code path serves both.
+//
+// SIZE ESTIMATES (typical 200-step × 24 × 16 × 4 × 58 dataset):
+//   raw uint8:              200 × 24 × 16 × 4 × 58 = 17.8 MB
 //   + manifest + events:    ~5 KB
-//   after gzip:             ~800 KB - 1.5 MB
+//   after gzip:             ~1.5 - 3 MB (interior slices are largely
+//                           uniform — long byte runs compress well, so
+//                           the depth axis costs far less than 4× gzipped)
+//   (format_version-1, depth-collapsed: 1/4 of the above)
 //
 // ============================================================
 
 // === HELIX-OVERLAY-FORK ADDITION (strip view bedrock, v149+) =========
 
-const _STRIP_FORMAT_VERSION = 1;
+// format_version 2 (2026-05-28): added the depth axis (radial sub-strips).
+// v1 datasets (no depth_positions) still load — see the backward-compat
+// note above.
+const _STRIP_FORMAT_VERSION = 2;
 const _STRIP_NULL_BYTE = 255;       // reserved value meaning "no data"
 const _STRIP_MAX_DATA_BYTE = 254;   // chip values map to [0, 254]
 
@@ -91,6 +114,9 @@ interface StripManifest {
     steps: number;              // = duration_steps
     angular_indices: number;    // sub-strip count (default 24, 15° each)
     height_positions: number;   // = wall.ring_count (typically 16)
+    depth_positions?: number;   // radial slices (format_version 2; default
+                                // 4 = boundary/near-wall/interior/center).
+                                // Absent/1 → degenerate wall-only (v1).
   };
   chips: StripChipMeta[];
   notes?: string;               // optional human note ("v148 baseline run", etc.)
@@ -141,20 +167,29 @@ function stripDequantizeNormalized(byte: number): number | null {
 // Tensor indexing
 // ============================================================
 
-// Linear index into the [step][angle][height][chip] row-major chip_data
-// array. Validates bounds and returns -1 if out of range.
+// Linear index into the [step][angle][height][depth][chip] row-major
+// chip_data array. Validates bounds and returns -1 if out of range.
+//
+// `depth` is a TRAILING optional param (default 0) so every pre-depth
+// caller keeps working untouched. With depth_positions absent-or-1 the
+// formula collapses to the original 3D layout (depth must be 0, and the
+// D=1 strides equal the old strides), so format_version-1 datasets index
+// identically. New (v2) callers pass depth ∈ [0, depth_positions).
 function stripDataIndex(
   step: number, angle: number, height: number, chip: number,
-  axes: StripManifest['axes'], chip_count: number
+  axes: StripManifest['axes'], chip_count: number, depth: number = 0
 ): number {
+  const D = (axes.depth_positions && axes.depth_positions > 0) ? axes.depth_positions : 1;
   if (step < 0 || step >= axes.steps) return -1;
   if (angle < 0 || angle >= axes.angular_indices) return -1;
   if (height < 0 || height >= axes.height_positions) return -1;
+  if (depth < 0 || depth >= D) return -1;
   if (chip < 0 || chip >= chip_count) return -1;
   return (
-    step * axes.angular_indices * axes.height_positions * chip_count +
-    angle * axes.height_positions * chip_count +
-    height * chip_count +
+    step * axes.angular_indices * axes.height_positions * D * chip_count +
+    angle * axes.height_positions * D * chip_count +
+    height * D * chip_count +
+    depth * chip_count +
     chip
   );
 }
@@ -166,7 +201,8 @@ function stripDataIndex(
 function stripAllocateData(
   axes: StripManifest['axes'], chip_count: number
 ): Uint8Array {
-  const total = axes.steps * axes.angular_indices * axes.height_positions * chip_count;
+  const D = (axes.depth_positions && axes.depth_positions > 0) ? axes.depth_positions : 1;
+  const total = axes.steps * axes.angular_indices * axes.height_positions * D * chip_count;
   return new Uint8Array(total);
 }
 

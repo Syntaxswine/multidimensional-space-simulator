@@ -204,6 +204,20 @@ const _HELIX_FULL_NAMES: { [id: string]: string } = {
   // === END HELIX-OVERLAY-FORK ADDITION ==============================
 };
 
+// PROPOSAL-CAVITY-INTERIOR-VOXELS Phase 3 — ambient radial-depth selector
+// for chip reads. The strip recorder sets this (via _setStripChipReadDepth)
+// before each radial-slice pass — depth 0 = wall, depth_count-1 = cavity
+// center — so _chipFluid pulls from the CavityVoxelGrid's interior voxels
+// instead of the d=0 wall cell, WITHOUT threading a depth param through
+// every (non-uniform) chip read signature. Mirrors the conditions.fluid
+// swap idiom in _runEngineForCrystal: set it, run the synchronous reads,
+// reset to 0. Default 0 = wall = the live helicoid's behavior, which never
+// touches this (so the live trail + replay paths are unaffected).
+let _stripChipReadDepth = 0;
+function _setStripChipReadDepth(d: number): void {
+  _stripChipReadDepth = (typeof d === 'number' && d > 0) ? (d | 0) : 0;
+}
+
 const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
   const params: ChemParam[] = [];
 
@@ -248,6 +262,15 @@ const _HELIX_CHEM_PARAMS: ChemParam[] = (function() {
   // to head that way for ages" — explicit architectural direction, not
   // just bug-fix scope.
   const _chipFluid = (s: any, w: any, ri: number, c: number): any => {
+    // Phase 3 radial depth: when the recorder is sampling an interior
+    // slice (_stripChipReadDepth > 0), pull the voxel grid's fluid object
+    // at that depth. depth 0 falls through to the wall (d=0) path below —
+    // identical to pre-Phase-3 behavior, since the d=0 voxel IS the wall
+    // mesh cell via the [FIRM] B alias.
+    if (_stripChipReadDepth > 0 && s && typeof s.fluidAtVoxel === 'function') {
+      const vf = s.fluidAtVoxel(ri, c | 0, _stripChipReadDepth);
+      if (vf) return vf;
+    }
     if (w && typeof w.meshFor === 'function') {
       const mesh = w.meshFor(s);
       if (mesh && mesh.cells) {
